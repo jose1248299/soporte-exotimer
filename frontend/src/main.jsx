@@ -184,12 +184,19 @@ function mediaUrl(message) {
   return apiUrl(`/api/conversations/messages/${message.id}/media`);
 }
 
-function MessageMedia({ message }) {
+function MessageMedia({ message, onPreview }) {
   if (message.contentType !== "IMAGE" || !message.mediaId) return null;
 
   return (
     <figure className="message-media">
-      <img src={mediaUrl(message)} alt={message.content || "Imagen enviada por WhatsApp"} loading="lazy" />
+      <button
+        className="message-media-preview"
+        type="button"
+        onClick={() => onPreview?.(message)}
+        title="Abrir imagen"
+      >
+        <img src={mediaUrl(message)} alt={message.content || "Imagen enviada por WhatsApp"} loading="lazy" />
+      </button>
       {message.mediaAnalysis?.summary && (
         <figcaption>
           <ImageIcon size={14} />
@@ -635,6 +642,7 @@ function SupportApp({ onBack }) {
   const [pendingActions, setPendingActions] = useState([]);
   const [configOpen, setConfigOpen] = useState(false);
   const [timersOpen, setTimersOpen] = useState(false);
+  const [previewImage, setPreviewImage] = useState(null);
   const listLoaded = useRef(false);
   const chatRef = useRef(null);
 
@@ -1007,9 +1015,9 @@ function SupportApp({ onBack }) {
                     ) : (
                       <article
                         key={message.id}
-                        className={`message ${message.direction === "OUTBOUND" ? "outbound" : "inbound"}`}
+                        className={`message ${message.direction === "OUTBOUND" ? "outbound" : "inbound"} ${message.contentType === "IMAGE" ? "has-media" : ""}`}
                       >
-                        <MessageMedia message={message} />
+                        <MessageMedia message={message} onPreview={setPreviewImage} />
                         {message.content && message.content !== "[Imagen recibida]" && <p>{message.content}</p>}
                         <time>
                           {humanTime(message.timestamp)}
@@ -1044,6 +1052,17 @@ function SupportApp({ onBack }) {
 
       <TimersModal open={timersOpen} onClose={() => setTimersOpen(false)} />
       <ConfigurationModal open={configOpen} onClose={() => setConfigOpen(false)} />
+      {previewImage && (
+        <div className="image-preview-backdrop" role="dialog" aria-modal="true" onClick={() => setPreviewImage(null)}>
+          <figure className="image-preview" onClick={(event) => event.stopPropagation()}>
+            <img src={mediaUrl(previewImage)} alt={previewImage.content || "Imagen enviada por WhatsApp"} />
+            <figcaption>
+              <span>{previewImage.mediaAnalysis?.summary || "Imagen enviada por WhatsApp"}</span>
+              <button type="button" onClick={() => setPreviewImage(null)}>Cerrar</button>
+            </figcaption>
+          </figure>
+        </div>
+      )}
     </main>
   );
 }

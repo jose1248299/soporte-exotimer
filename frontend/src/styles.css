@@ -617,6 +617,10 @@ button {
   box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
 }
 
+.message.has-media {
+  max-width: min(560px, 82%);
+}
+
 .message p {
   margin: 0;
   color: inherit;
@@ -627,14 +631,26 @@ button {
 }
 
 .message-media {
-  width: min(320px, 100%);
+  width: fit-content;
+  max-width: 100%;
   margin: 0 0 8px;
+}
+
+.message-media-preview {
+  display: block;
+  max-width: 100%;
+  border: 0;
+  border-radius: 8px;
+  padding: 0;
+  background: transparent;
 }
 
 .message-media img {
   display: block;
-  width: 100%;
-  max-height: 360px;
+  width: auto;
+  height: auto;
+  max-width: min(360px, 100%);
+  max-height: min(560px, 65vh);
   object-fit: contain;
   border-radius: 8px;
   background: #0f172a;
@@ -653,6 +669,59 @@ button {
 
 .message.outbound .message-media figcaption {
   color: rgba(255, 255, 255, 0.78);
+}
+
+.image-preview-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(15, 23, 42, 0.74);
+}
+
+.image-preview {
+  width: min(760px, 100%);
+  max-height: calc(100vh - 36px);
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 10px;
+  margin: 0;
+}
+
+.image-preview img {
+  max-width: 100%;
+  max-height: calc(100vh - 104px);
+  justify-self: center;
+  object-fit: contain;
+  border-radius: 8px;
+  background: #0f172a;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+}
+
+.image-preview figcaption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: #172033;
+  background: #ffffff;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.image-preview button {
+  height: 34px;
+  border: 1px solid #d7dee8;
+  border-radius: 8px;
+  padding: 0 12px;
+  color: #344256;
+  background: #ffffff;
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .message time {
