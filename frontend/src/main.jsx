@@ -7,6 +7,7 @@ import {
   ClipboardCheck,
   Clock3,
   Headphones,
+  Image as ImageIcon,
   LockKeyhole,
   MessageCircle,
   Search,
@@ -166,12 +167,37 @@ function humanDate(value) {
 
 function normalizeConversation(item) {
   const last = item.messages?.[0];
+  const lastMessage = last?.contentType === "IMAGE"
+    ? last.content && last.content !== "[Imagen recibida]"
+      ? `Imagen: ${last.content}`
+      : "Imagen recibida"
+    : last?.content || "Sin mensajes recientes";
   return {
     ...item,
     name: item.displayName || item.phone || "Cliente",
-    lastMessage: last?.content || "Sin mensajes recientes",
+    lastMessage,
     lastTimestamp: item.lastMessageAt || last?.timestamp || item.updatedAt,
   };
+}
+
+function mediaUrl(message) {
+  return `/api/conversations/messages/${message.id}/media`;
+}
+
+function MessageMedia({ message }) {
+  if (message.contentType !== "IMAGE" || !message.mediaId) return null;
+
+  return (
+    <figure className="message-media">
+      <img src={mediaUrl(message)} alt={message.content || "Imagen enviada por WhatsApp"} loading="lazy" />
+      {message.mediaAnalysis?.summary && (
+        <figcaption>
+          <ImageIcon size={14} />
+          {message.mediaAnalysis.summary}
+        </figcaption>
+      )}
+    </figure>
+  );
 }
 
 function LoginScreen({ onContinue }) {
@@ -983,7 +1009,8 @@ function SupportApp({ onBack }) {
                         key={message.id}
                         className={`message ${message.direction === "OUTBOUND" ? "outbound" : "inbound"}`}
                       >
-                        <p>{message.content}</p>
+                        <MessageMedia message={message} />
+                        {message.content && message.content !== "[Imagen recibida]" && <p>{message.content}</p>}
                         <time>
                           {humanTime(message.timestamp)}
                           {message.failed ? " · no enviado" : ""}

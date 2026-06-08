@@ -4,6 +4,24 @@ const { sendTextMessage } = require("../services/waba");
 
 const router = express.Router();
 
+const messageSelect = {
+  id: true,
+  conversationId: true,
+  waId: true,
+  direction: true,
+  contentType: true,
+  phone: true,
+  content: true,
+  mediaId: true,
+  mediaMimeType: true,
+  mediaSha256: true,
+  mediaFilename: true,
+  mediaAnalysis: true,
+  aiMetadata: true,
+  timestamp: true,
+  createdAt: true,
+};
+
 router.get("/", async (req, res) => {
   const userType = req.query.userType ? String(req.query.userType).toUpperCase() : undefined;
 
@@ -14,6 +32,7 @@ router.get("/", async (req, res) => {
       messages: {
         orderBy: { timestamp: "desc" },
         take: 1,
+        select: messageSelect,
       },
     },
   });
@@ -28,13 +47,36 @@ router.get("/:id", async (req, res) => {
   const conversation = await prisma.conversation.findUnique({
     where: { id },
     include: {
-      messages: { orderBy: { timestamp: "asc" } },
+      messages: { orderBy: { timestamp: "asc" }, select: messageSelect },
       actions: { orderBy: { createdAt: "desc" } },
     },
   });
 
   if (!conversation) return res.status(404).json({ error: "Conversacion no encontrada" });
   res.json(conversation);
+});
+
+router.get("/messages/:messageId/media", async (req, res) => {
+  const messageId = Number(req.params.messageId);
+  if (!Number.isInteger(messageId)) return res.status(400).json({ error: "ID invalido" });
+
+  const message = await prisma.message.findUnique({
+    where: { id: messageId },
+    select: {
+      mediaData: true,
+      mediaMimeType: true,
+      mediaFilename: true,
+    },
+  });
+
+  if (!message?.mediaData) return res.status(404).json({ error: "Media no encontrado" });
+
+  res.setHeader("Content-Type", message.mediaMimeType || "application/octet-stream");
+  res.setHeader("Cache-Control", "private, max-age=3600");
+  if (message.mediaFilename) {
+    res.setHeader("Content-Disposition", `inline; filename="${message.mediaFilename.replace(/"/g, "")}"`);
+  }
+  res.send(Buffer.from(message.mediaData));
 });
 
 router.post("/:id/messages", async (req, res) => {

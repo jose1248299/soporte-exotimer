@@ -24,6 +24,11 @@ enum MessageChannel {
   WHATSAPP
 }
 
+enum MessageContentType {
+  TEXT
+  IMAGE
+}
+
 enum ConversationStatus {
   OPEN
   WAITING_HUMAN
@@ -77,8 +82,15 @@ model Message {
   conversationId Int
   waId           String?          @unique
   direction      MessageDirection
+  contentType    MessageContentType @default(TEXT)
   phone          String
   content        String
+  mediaId        String?
+  mediaMimeType  String?
+  mediaSha256    String?
+  mediaFilename  String?
+  mediaData      Bytes?
+  mediaAnalysis  Json?
   rawPayload     Json?
   aiMetadata     Json?
   timestamp      DateTime         @default(now())

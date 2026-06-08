@@ -43,4 +43,36 @@ async function sendTextMessage(to, body) {
   });
 }
 
-module.exports = { sendTextMessage };
+async function getMediaUrl(mediaId) {
+  assertMetaConfig();
+
+  const { data } = await axios.get(`${apiUrl}/${mediaId}`, {
+    headers: {
+      Authorization: `Bearer ${config.meta.accessToken}`,
+    },
+    timeout: 15000,
+  });
+
+  if (!data?.url) throw new Error("Meta no devolvio URL de media.");
+  return data;
+}
+
+async function downloadMedia(mediaId) {
+  const media = await getMediaUrl(mediaId);
+  const response = await axios.get(media.url, {
+    responseType: "arraybuffer",
+    headers: {
+      Authorization: `Bearer ${config.meta.accessToken}`,
+    },
+    timeout: 30000,
+  });
+
+  return {
+    buffer: Buffer.from(response.data),
+    mimeType: response.headers["content-type"] || media.mime_type || null,
+    sha256: media.sha256 || null,
+    url: media.url,
+  };
+}
+
+module.exports = { downloadMedia, sendTextMessage };

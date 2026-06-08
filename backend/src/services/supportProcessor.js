@@ -1,8 +1,8 @@
 const prisma = require("../lib/prisma");
-const { classifyMessage, composeReply } = require("./ai");
+const { analyzeImageEvidence, classifyMessage, composeReply } = require("./ai");
 const { executeAction, requiresConfirmation } = require("./exotimerClient");
 const { getPolicy } = require("./supportPolicies");
-const { sendTextMessage } = require("./waba");
+const { downloadMedia, sendTextMessage } = require("./waba");
 const { normalizePhone } = require("../utils/phone");
 
 async function findOrCreateConversation({ phone, displayName }) {
@@ -24,16 +24,23 @@ function compactMessage(message) {
   return {
     direction: message.direction,
     content: message.content,
+    contentType: message.contentType,
+    mediaAnalysis: message.mediaAnalysis,
     timestamp: message.timestamp,
   };
 }
 
 function mergeActionInput(previousInput = {}, nextInput = {}) {
+  const merged = {
+    ...previousInput,
+    ...nextInput,
+  };
+  if (nextInput.competitionId || nextInput.competition_id || nextInput.competition) {
+    delete merged.missingFields;
+  }
+
   return Object.fromEntries(
-    Object.entries({
-      ...previousInput,
-      ...nextInput,
-    }).filter(([, value]) => value !== undefined && value !== null && value !== "")
+    Object.entries(merged).filter(([, value]) => value !== undefined && value !== null && value !== "")
   );
 }
 
@@ -140,7 +147,37 @@ function missingFieldsForAction(actionName, input = {}) {
   return missing;
 }
 
-async function processInboundText({ waId, from, text, timestamp, rawPayload, displayName }) {
+function buildImageAnalysisText(mediaAnalysis) {
+  if (!mediaAnalysis) return "";
+  const extracted = mediaAnalysis.extracted || {};
+  const extractedText = Object.entries(extracted)
+    .filter(([, value]) => value !== undefined && value !== null && value !== "")
+    .map(([key, value]) => `${key}: ${value}`)
+    .join(", ");
+  const visibleText = Array.isArray(mediaAnalysis.visibleText) && mediaAnalysis.visibleText.length
+    ? `Textos visibles: ${mediaAnalysis.visibleText.join(" | ")}.`
+    : "";
+  return [
+    mediaAnalysis.summary ? `Analisis de imagen: ${mediaAnalysis.summary}.` : "",
+    visibleText,
+    extractedText ? `Datos extraidos: ${extractedText}.` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function buildProcessableText({ text, mediaAnalysis }) {
+  return [text, buildImageAnalysisText(mediaAnalysis)].filter(Boolean).join("\n\n");
+}
+
+async function processInboundText(args) {
+  return processInboundMessage({
+    ...args,
+    type: "text",
+  });
+}
+
+async function processInboundMessage({ waId, from, text = "", timestamp, rawPayload, displayName, type = "text", media }) {
   const phone = normalizePhone(from);
 
   if (waId) {
@@ -153,14 +190,70 @@ async function processInboundText({ waId, from, text, timestamp, rawPayload, dis
   });
 
   const conversation = await findOrCreateConversation({ phone, displayName });
+  const previousMessages = await prisma.message.findMany({
+    where: { conversationId: conversation.id },
+    orderBy: { timestamp: "desc" },
+    take: 12,
+  });
+  const previousHistory = [...previousMessages].reverse().map(compactMessage);
+
+  let mediaPayload = null;
+  let mediaAnalysis = null;
+  const contentType = type === "image" ? "IMAGE" : "TEXT";
+  const baseContent = String(text || "").trim();
+
+  if (contentType === "IMAGE" && media?.id) {
+    mediaPayload = {
+      mediaId: media.id,
+      mediaMimeType: media.mimeType || null,
+      mediaSha256: media.sha256 || null,
+      mediaFilename: media.filename || null,
+    };
+
+    try {
+      const downloaded = await downloadMedia(media.id);
+      mediaPayload = {
+        ...mediaPayload,
+        mediaMimeType: media.mimeType || downloaded.mimeType,
+        mediaSha256: media.sha256 || downloaded.sha256,
+        mediaData: downloaded.buffer,
+      };
+
+      mediaAnalysis = await analyzeImageEvidence({
+        buffer: downloaded.buffer,
+        mimeType: mediaPayload.mediaMimeType,
+        caption: baseContent,
+        conversationContext: {
+          previousUserType: conversation.userType,
+          previousClassification: conversation.classification,
+          history: previousHistory,
+        },
+      });
+    } catch (error) {
+      mediaAnalysis = {
+        summary: "No se pudo descargar o analizar la imagen recibida.",
+        error: error.message,
+        relevance: "media",
+        confidence: 0,
+      };
+    }
+  }
+
+  const content = contentType === "IMAGE"
+    ? baseContent || "[Imagen recibida]"
+    : baseContent;
+  const processableText = buildProcessableText({ text: content, mediaAnalysis });
 
   const inbound = await prisma.message.create({
     data: {
       conversationId: conversation.id,
       waId,
       direction: "INBOUND",
+      contentType,
       phone,
-      content: text,
+      content,
+      ...(mediaPayload || {}),
+      mediaAnalysis,
       rawPayload,
       timestamp,
     },
@@ -174,7 +267,7 @@ async function processInboundText({ waId, from, text, timestamp, rawPayload, dis
   const history = [...recentMessages].reverse().map(compactMessage);
 
   let classification = await classifyMessage({
-    text,
+    text: processableText,
     forcedTimer: Boolean(timer),
     previousClassification: conversation.classification,
     previousUserType: conversation.userType,
@@ -198,6 +291,12 @@ async function processInboundText({ waId, from, text, timestamp, rawPayload, dis
         missingFields,
       },
       summary: `${classification.summary} Faltan datos para ejecutar la accion automatica.`,
+    };
+  } else if (classification.actionInput?.missingFields) {
+    const { missingFields: _missingFields, ...actionInput } = classification.actionInput;
+    classification = {
+      ...classification,
+      actionInput,
     };
   }
 
@@ -253,7 +352,7 @@ async function processInboundText({ waId, from, text, timestamp, rawPayload, dis
       ...classification.actionInput,
       source: "whatsapp",
       phone,
-      message: text,
+      message: processableText,
     };
 
     if (!policy.enabled) {
@@ -302,7 +401,7 @@ async function processInboundText({ waId, from, text, timestamp, rawPayload, dis
 
   const reply = await composeReply({
     userType,
-    text,
+    text: processableText,
     classification,
     actionResult,
     actionError,
@@ -347,4 +446,4 @@ async function processInboundText({ waId, from, text, timestamp, rawPayload, dis
   };
 }
 
-module.exports = { processInboundText };
+module.exports = { processInboundMessage, processInboundText };

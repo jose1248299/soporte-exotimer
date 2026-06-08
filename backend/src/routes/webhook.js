@@ -1,6 +1,6 @@
 const express = require("express");
 const config = require("../config");
-const { processInboundText } = require("../services/supportProcessor");
+const { processInboundMessage } = require("../services/supportProcessor");
 
 const router = express.Router();
 
@@ -28,7 +28,7 @@ router.post("/", async (req, res) => {
     const message = value?.messages?.[0];
 
     if (!message) return res.sendStatus(200);
-    if (message.type !== "text") return res.sendStatus(200);
+    if (!["text", "image"].includes(message.type)) return res.sendStatus(200);
 
     const contact = value.contacts?.[0];
     const timestamp = message.timestamp
@@ -37,10 +37,18 @@ router.post("/", async (req, res) => {
 
     res.sendStatus(200);
 
-    await processInboundText({
+    await processInboundMessage({
       waId: message.id || null,
       from: message.from,
-      text: message.text?.body || "",
+      type: message.type,
+      text: message.type === "image" ? message.image?.caption || "" : message.text?.body || "",
+      media: message.type === "image"
+        ? {
+            id: message.image?.id || null,
+            mimeType: message.image?.mime_type || null,
+            sha256: message.image?.sha256 || null,
+          }
+        : null,
       timestamp,
       rawPayload: req.body,
       displayName: contact?.profile?.name || null,

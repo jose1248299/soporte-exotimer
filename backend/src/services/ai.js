@@ -235,7 +235,64 @@ async function composeReply({
   return completion.choices[0]?.message?.content?.trim() || fallbackReply(userType);
 }
 
+async function analyzeImageEvidence({ buffer, mimeType, caption, conversationContext }) {
+  const client = getClient();
+  if (!client || !buffer || !mimeType?.startsWith("image/")) return null;
+
+  const dataUrl = `data:${mimeType};base64,${Buffer.from(buffer).toString("base64")}`;
+  const completion = await client.chat.completions.create({
+    model: config.openai.model,
+    temperature: 0.1,
+    messages: [
+      {
+        role: "system",
+        content:
+          "Analiza imagenes enviadas como evidencia para soporte de cronometraje deportivo. Devuelve JSON estricto, breve y util. No inventes datos ilegibles.",
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              caption,
+              conversationContext,
+              expectedJson: {
+                summary: "descripcion breve",
+                visibleText: ["textos legibles relevantes"],
+                extracted: {
+                  athleteName: null,
+                  dorsal: null,
+                  competitionName: null,
+                  time: null,
+                  resultPosition: null,
+                },
+                relevance: "alta|media|baja",
+                confidence: 0,
+              },
+            }),
+          },
+          {
+            type: "image_url",
+            image_url: { url: dataUrl },
+          },
+        ],
+      },
+    ],
+  });
+
+  const parsed = parseJson(completion.choices[0]?.message?.content);
+  return parsed || {
+    summary: completion.choices[0]?.message?.content?.trim() || "Imagen recibida como evidencia.",
+    visibleText: [],
+    extracted: {},
+    relevance: "media",
+    confidence: 0.4,
+  };
+}
+
 module.exports = {
+  analyzeImageEvidence,
   classifyMessage,
   composeReply,
 };
