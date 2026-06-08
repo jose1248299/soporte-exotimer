@@ -1,0 +1,126 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserType {
+  TIMER
+  BUYER
+  ORGANIZER
+  ATHLETE
+  UNKNOWN
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum MessageChannel {
+  WHATSAPP
+}
+
+enum ConversationStatus {
+  OPEN
+  WAITING_HUMAN
+  RESOLVED
+}
+
+enum SupportActionStatus {
+  PROPOSED
+  EXECUTED
+  FAILED
+  SKIPPED
+}
+
+model TimerContact {
+  id        Int      @id @default(autoincrement())
+  name      String
+  phone     String   @unique
+  active    Boolean  @default(true)
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([phone])
+}
+
+model Conversation {
+  id             Int                @id @default(autoincrement())
+  channel        MessageChannel     @default(WHATSAPP)
+  phone          String
+  displayName    String?
+  userType       UserType           @default(UNKNOWN)
+  status         ConversationStatus @default(OPEN)
+  lastMessageAt  DateTime?
+  confidence     Float?
+  classification Json?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  messages Message[]
+  actions  SupportAction[]
+
+  @@unique([channel, phone])
+  @@index([phone])
+  @@index([userType])
+  @@index([status])
+  @@index([lastMessageAt])
+}
+
+model Message {
+  id             Int              @id @default(autoincrement())
+  conversationId Int
+  waId           String?          @unique
+  direction      MessageDirection
+  phone          String
+  content        String
+  rawPayload     Json?
+  aiMetadata     Json?
+  timestamp      DateTime         @default(now())
+  createdAt      DateTime         @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, timestamp])
+  @@index([phone])
+}
+
+model SupportAction {
+  id             Int                 @id @default(autoincrement())
+  conversationId Int
+  messageId      Int?
+  userType       UserType
+  name           String
+  status         SupportActionStatus @default(PROPOSED)
+  input          Json
+  output         Json?
+  error          String?
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId])
+  @@index([status])
+  @@index([name])
+}
+
+model SupportPolicy {
+  id            Int      @id @default(autoincrement())
+  userType      UserType
+  actionName    String
+  enabled       Boolean  @default(false)
+  requiresHuman Boolean  @default(true)
+  notes         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([userType, actionName])
+  @@index([userType])
+  @@index([actionName])
+}

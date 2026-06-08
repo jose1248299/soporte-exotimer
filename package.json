@@ -1,0 +1,32 @@
+{
+  "name": "soporte-exotimer",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "node --watch backend/src/server.js",
+    "dev:backend": "node --watch backend/src/server.js",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "build:frontend": "npm --prefix frontend run build",
+    "start": "node backend/src/server.js",
+    "prisma:generate": "prisma generate --schema backend/prisma/schema.prisma",
+    "prisma:migrate": "prisma migrate dev --schema backend/prisma/schema.prisma",
+    "prisma:deploy": "prisma migrate deploy --schema backend/prisma/schema.prisma",
+    "prisma:seed-policies": "node backend/src/scripts/seedSupportPolicies.js",
+    "prisma:studio": "prisma studio --schema backend/prisma/schema.prisma"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.9.0",
+    "axios": "^1.9.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.5.0",
+    "express": "^5.1.0",
+    "openai": "^4.103.0",
+    "zod": "^3.25.56"
+  },
+  "devDependencies": {
+    "prisma": "^6.9.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
