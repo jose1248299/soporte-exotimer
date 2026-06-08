@@ -19,7 +19,7 @@ import {
   UserRound,
   Zap,
 } from "lucide-react";
-import { apiFetch } from "./utils/api.js";
+import { apiFetch, apiUrl } from "./utils/api.js";
 import "./styles.css";
 
 const USER_LABELS = {
@@ -181,7 +181,7 @@ function normalizeConversation(item) {
 }
 
 function mediaUrl(message) {
-  return `/api/conversations/messages/${message.id}/media`;
+  return apiUrl(`/api/conversations/messages/${message.id}/media`);
 }
 
 function MessageMedia({ message }) {
