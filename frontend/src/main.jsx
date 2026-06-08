@@ -707,13 +707,13 @@ function SupportApp({ onBack }) {
     };
   }, []);
 
-  const loadMessages = useCallback(async (conversation) => {
+  const loadMessages = useCallback(async (conversation, { silent = false } = {}) => {
     if (!conversation) return;
-    setLoadingChat(true);
+    if (!silent) setLoadingChat(true);
 
     if (String(conversation.id).startsWith("demo-")) {
       setMessages(MOCK_MESSAGES[conversation.id] || []);
-      setLoadingChat(false);
+      if (!silent) setLoadingChat(false);
       return;
     }
 
@@ -726,22 +726,22 @@ function SupportApp({ onBack }) {
         setMessages(Array.isArray(data.messages) ? data.messages : []);
       })
       .catch(() => {
-        setMessages([]);
+        if (!silent) setMessages([]);
       })
       .finally(() => {
-        setLoadingChat(false);
+        if (!silent) setLoadingChat(false);
       });
   }, []);
 
   useEffect(() => {
     if (!selected) return;
     loadMessages(selected);
-    const interval = window.setInterval(() => loadMessages(selected), 8000);
+    const interval = window.setInterval(() => loadMessages(selected, { silent: true }), 8000);
 
     return () => {
       window.clearInterval(interval);
     };
-  }, [loadMessages, selected]);
+  }, [loadMessages, selected?.id]);
 
   useEffect(() => {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
