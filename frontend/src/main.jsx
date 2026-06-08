@@ -14,6 +14,7 @@ import {
   Settings,
   ShieldCheck,
   Sparkles,
+  UserCog,
   UserRound,
   Zap,
 } from "lucide-react";
@@ -389,6 +390,210 @@ function ConfigurationModal({ open, onClose }) {
   );
 }
 
+const EMPTY_TIMER_FORM = {
+  id: null,
+  name: "",
+  phone: "",
+  active: true,
+  notes: "",
+};
+
+function TimersModal({ open, onClose }) {
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [timers, setTimers] = useState([]);
+  const [form, setForm] = useState(EMPTY_TIMER_FORM);
+  const [loadError, setLoadError] = useState("");
+
+  const editing = Boolean(form.id);
+
+  useEffect(() => {
+    if (!open) return;
+    let canceled = false;
+    setLoading(true);
+    setLoadError("");
+
+    apiFetch("/api/timers", { timeoutMs: 10000 })
+      .then((res) => {
+        if (!res.ok) throw new Error("No se pudo cargar timers");
+        return res.json();
+      })
+      .then((data) => {
+        if (!canceled) setTimers(Array.isArray(data) ? data : []);
+      })
+      .catch(() => {
+        if (!canceled) {
+          setTimers([]);
+          setLoadError("No se pudo cargar la lista de Timers.");
+        }
+      })
+      .finally(() => {
+        if (!canceled) setLoading(false);
+      });
+
+    return () => {
+      canceled = true;
+    };
+  }, [open]);
+
+  function updateForm(field, value) {
+    setForm((current) => ({ ...current, [field]: value }));
+  }
+
+  function editTimer(timer) {
+    setForm({
+      id: timer.id,
+      name: timer.name || "",
+      phone: timer.phone || "",
+      active: Boolean(timer.active),
+      notes: timer.notes || "",
+    });
+  }
+
+  function resetForm() {
+    setForm(EMPTY_TIMER_FORM);
+  }
+
+  async function saveTimer(event) {
+    event.preventDefault();
+    if (!form.name.trim() || !form.phone.trim()) return;
+
+    setSaving(true);
+    try {
+      const payload = {
+        name: form.name.trim(),
+        phone: form.phone.trim(),
+        active: Boolean(form.active),
+        notes: form.notes.trim() || null,
+      };
+      const res = await apiFetch(editing ? `/api/timers/${form.id}` : "/api/timers", {
+        method: editing ? "PATCH" : "POST",
+        body: JSON.stringify(payload),
+        timeoutMs: 10000,
+      });
+      if (!res.ok) throw new Error("No se pudo guardar Timer");
+      const saved = await res.json();
+      setTimers((current) => {
+        const exists = current.some((timer) => timer.id === saved.id);
+        const next = exists
+          ? current.map((timer) => (timer.id === saved.id ? saved : timer))
+          : [...current, saved];
+        return next.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+      });
+      resetForm();
+    } catch {
+      alert("No se pudo guardar el Timer.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!open) return null;
+
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true">
+      <section className="config-modal timers-modal">
+        <header className="config-header">
+          <div>
+            <p className="eyebrow">Timers</p>
+            <h2>Usuarios autorizados</h2>
+            <p>Registra los numeros que se identificaran automaticamente como Timer.</p>
+          </div>
+          <button className="icon-button" onClick={onClose} title="Cerrar">
+            <ArrowLeft size={18} />
+          </button>
+        </header>
+
+        <div className="timers-body">
+          <section className="timer-list" aria-label="Timers registrados">
+            <div className="timer-list-header">
+              <strong>{loading ? "Cargando..." : `${timers.length} Timers`}</strong>
+              <button type="button" onClick={resetForm}>
+                Nuevo
+              </button>
+            </div>
+
+            {loadError ? (
+              <div className="config-empty">{loadError}</div>
+            ) : timers.length === 0 && !loading ? (
+              <div className="config-empty">Todavia no hay Timers registrados.</div>
+            ) : (
+              <div className="timer-list-scroll">
+                {timers.map((timer) => (
+                  <button
+                    key={timer.id}
+                    className={`timer-item ${form.id === timer.id ? "active" : ""}`}
+                    onClick={() => editTimer(timer)}
+                  >
+                    <span>
+                      <strong>{timer.name}</strong>
+                      <small>{timer.phone}</small>
+                    </span>
+                    <em>{timer.active ? "Activo" : "Inactivo"}</em>
+                  </button>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <form className="timer-form" onSubmit={saveTimer}>
+            <div>
+              <p className="eyebrow">{editing ? "Editar Timer" : "Nuevo Timer"}</p>
+              <h3>{editing ? form.name || "Timer" : "Agregar contacto"}</h3>
+            </div>
+
+            <label>
+              Nombre
+              <input
+                value={form.name}
+                onChange={(event) => updateForm("name", event.target.value)}
+                placeholder="Timer Norte"
+              />
+            </label>
+
+            <label>
+              Telefono WhatsApp
+              <input
+                value={form.phone}
+                onChange={(event) => updateForm("phone", event.target.value)}
+                placeholder="+51999999999"
+              />
+            </label>
+
+            <label>
+              Notas
+              <textarea
+                value={form.notes}
+                onChange={(event) => updateForm("notes", event.target.value)}
+                placeholder="Zona, empresa o eventos que suele operar"
+              />
+            </label>
+
+            <label className="switch-line timer-active">
+              <input
+                type="checkbox"
+                checked={form.active}
+                onChange={(event) => updateForm("active", event.target.checked)}
+              />
+              <span>Timer activo</span>
+            </label>
+
+            <div className="timer-form-actions">
+              <button type="button" className="secondary-action" onClick={resetForm}>
+                Limpiar
+              </button>
+              <button className="primary-action compact" disabled={saving || !form.name.trim() || !form.phone.trim()}>
+                <ShieldCheck size={17} />
+                {saving ? "Guardando..." : "Guardar"}
+              </button>
+            </div>
+          </form>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function SupportApp({ onBack }) {
   const [conversations, setConversations] = useState([]);
   const [selected, setSelected] = useState(null);
@@ -403,6 +608,7 @@ function SupportApp({ onBack }) {
   const [listError, setListError] = useState("");
   const [pendingActions, setPendingActions] = useState([]);
   const [configOpen, setConfigOpen] = useState(false);
+  const [timersOpen, setTimersOpen] = useState(false);
   const listLoaded = useRef(false);
   const chatRef = useRef(null);
 
@@ -607,6 +813,10 @@ function SupportApp({ onBack }) {
           </div>
         </div>
         <div className="topbar-actions">
+          <button className="status-chip config-trigger" onClick={() => setTimersOpen(true)}>
+            <UserCog size={15} />
+            Timers
+          </button>
           <button className="status-chip config-trigger" onClick={() => setConfigOpen(true)}>
             <Settings size={15} />
             Configuracion
@@ -805,6 +1015,7 @@ function SupportApp({ onBack }) {
         </section>
       </section>
 
+      <TimersModal open={timersOpen} onClose={() => setTimersOpen(false)} />
       <ConfigurationModal open={configOpen} onClose={() => setConfigOpen(false)} />
     </main>
   );
