@@ -51,10 +51,10 @@ services:
         scope: RUN_TIME
         type: SECRET
       - key: META_WABA_ID
-        value: "961163613425275"
+        value: "1012135447511189"
         scope: RUN_TIME
       - key: META_PHONE_NUMBER_ID
-        value: "1159576543903263"
+        value: "1196096070249376"
         scope: RUN_TIME
       - key: META_GRAPH_VERSION
         value: v25.0
