@@ -45,7 +45,7 @@ services:
         value: production
         scope: RUN_TIME
       - key: DATABASE_URL
-        value: ${soporte-db.DATABASE_PRIVATE_URL}
+        value: ${soporte-db.DATABASE_URL}
         scope: RUN_AND_BUILD_TIME
       - key: META_ACCESS_TOKEN
         scope: RUN_TIME
