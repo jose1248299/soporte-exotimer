@@ -399,6 +399,18 @@ button {
   color: #8793a4;
 }
 
+.inline-alert {
+  margin: 10px 12px 0;
+  border: 1px solid #f1d3a2;
+  border-radius: 8px;
+  padding: 9px 10px;
+  color: #7a4b12;
+  background: #fff8ea;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
 .search-box input {
   min-width: 0;
   width: 100%;

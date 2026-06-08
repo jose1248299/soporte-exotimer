@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   ArrowLeft,
@@ -390,7 +390,7 @@ function ConfigurationModal({ open, onClose }) {
 }
 
 function SupportApp({ onBack }) {
-  const [conversations, setConversations] = useState(MOCK_CONVERSATIONS.map(normalizeConversation));
+  const [conversations, setConversations] = useState([]);
   const [selected, setSelected] = useState(null);
   const [messages, setMessages] = useState([]);
   const [query, setQuery] = useState("");
@@ -400,46 +400,52 @@ function SupportApp({ onBack }) {
   const [loadingChat, setLoadingChat] = useState(false);
   const [sending, setSending] = useState(false);
   const [usingDemo, setUsingDemo] = useState(true);
+  const [listError, setListError] = useState("");
   const [pendingActions, setPendingActions] = useState([]);
   const [configOpen, setConfigOpen] = useState(false);
   const listLoaded = useRef(false);
   const chatRef = useRef(null);
 
-  useEffect(() => {
-    let canceled = false;
-    const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 1200);
-    setLoadingList(true);
+  const loadConversations = useCallback(async ({ silent = false } = {}) => {
+    if (!silent) setLoadingList(true);
+    setListError("");
 
-    apiFetch("/api/conversations", { signal: controller.signal })
+    return apiFetch("/api/conversations", { timeoutMs: 10000 })
       .then((res) => {
         if (!res.ok) throw new Error("API no disponible");
         return res.json();
       })
       .then((data) => {
-        if (canceled) return;
         const normalized = Array.isArray(data) ? data.map(normalizeConversation) : [];
-        setConversations(normalized.length ? normalized : MOCK_CONVERSATIONS.map(normalizeConversation));
-        setUsingDemo(normalized.length === 0);
+        setConversations(normalized);
+        setUsingDemo(false);
+        if (!normalized.length) setMessages([]);
+        setSelected((current) => {
+          if (!normalized.length) return null;
+          if (!current || String(current.id).startsWith("demo-")) return normalized[0];
+          return normalized.find((item) => item.id === current.id) || normalized[0];
+        });
         listLoaded.current = true;
       })
       .catch(() => {
-        if (!canceled) {
-          setConversations(MOCK_CONVERSATIONS.map(normalizeConversation));
-          setUsingDemo(true);
-        }
+        setConversations(MOCK_CONVERSATIONS.map(normalizeConversation));
+        setSelected((current) => current || normalizeConversation(MOCK_CONVERSATIONS[0]));
+        setUsingDemo(true);
+        setListError("No se pudo conectar con la API. Mostrando datos demo.");
       })
       .finally(() => {
-        window.clearTimeout(timeout);
-        if (!canceled) setLoadingList(false);
+        if (!silent) setLoadingList(false);
       });
+  }, []);
+
+  useEffect(() => {
+    loadConversations();
+    const interval = window.setInterval(() => loadConversations({ silent: true }), 15000);
 
     return () => {
-      canceled = true;
-      window.clearTimeout(timeout);
-      controller.abort();
+      window.clearInterval(interval);
     };
-  }, []);
+  }, [loadConversations]);
 
   useEffect(() => {
     let canceled = false;
@@ -461,36 +467,41 @@ function SupportApp({ onBack }) {
     };
   }, []);
 
-  useEffect(() => {
-    if (!selected) return;
-    let canceled = false;
+  const loadMessages = useCallback(async (conversation) => {
+    if (!conversation) return;
     setLoadingChat(true);
 
-    if (String(selected.id).startsWith("demo-")) {
-      setMessages(MOCK_MESSAGES[selected.id] || []);
+    if (String(conversation.id).startsWith("demo-")) {
+      setMessages(MOCK_MESSAGES[conversation.id] || []);
       setLoadingChat(false);
       return;
     }
 
-    apiFetch(`/api/conversations/${selected.id}`)
+    return apiFetch(`/api/conversations/${conversation.id}`, { timeoutMs: 10000 })
       .then((res) => {
         if (!res.ok) throw new Error("No se pudo cargar conversacion");
         return res.json();
       })
       .then((data) => {
-        if (!canceled) setMessages(Array.isArray(data.messages) ? data.messages : []);
+        setMessages(Array.isArray(data.messages) ? data.messages : []);
       })
       .catch(() => {
-        if (!canceled) setMessages([]);
+        setMessages([]);
       })
       .finally(() => {
-        if (!canceled) setLoadingChat(false);
+        setLoadingChat(false);
       });
+  }, []);
+
+  useEffect(() => {
+    if (!selected) return;
+    loadMessages(selected);
+    const interval = window.setInterval(() => loadMessages(selected), 8000);
 
     return () => {
-      canceled = true;
+      window.clearInterval(interval);
     };
-  }, [selected]);
+  }, [loadMessages, selected]);
 
   useEffect(() => {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
@@ -659,9 +670,17 @@ function SupportApp({ onBack }) {
           <div className="pane-header">
             <div>
               <h2>Mensajes</h2>
-              <p>{loadingList ? "Cargando..." : `${filtered.length} visibles`}</p>
+              <p>
+                {loadingList
+                  ? "Cargando..."
+                  : usingDemo
+                    ? "Datos demo"
+                    : `${filtered.length} reales`}
+              </p>
             </div>
           </div>
+
+          {listError && <div className="inline-alert">{listError}</div>}
 
           <div className="search-box">
             <Search size={18} />
