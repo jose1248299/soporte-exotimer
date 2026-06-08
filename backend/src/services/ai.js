@@ -168,7 +168,7 @@ function fallbackReply(userType) {
   if (userType === "TIMER") {
     return "Hola, Timer identificado. Indicame la competencia, punto de control o salida, y el cambio exacto que necesitas revisar.";
   }
-  return "Hola, gracias por escribir a Finisher Data. Cuentame si consultas por precios, tickets de un evento o resultados.";
+  return "Hola, gracias por escribir a Finisher Data. Cuentame si consultas por inscripciones o resultados de un evento?";
 }
 
 async function composeReply({ userType, text, classification, actionResult, actionError, actionPending }) {
