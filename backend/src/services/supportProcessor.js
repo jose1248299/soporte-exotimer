@@ -20,6 +20,126 @@ async function findOrCreateConversation({ phone, displayName }) {
   });
 }
 
+function compactMessage(message) {
+  return {
+    direction: message.direction,
+    content: message.content,
+    timestamp: message.timestamp,
+  };
+}
+
+function mergeActionInput(previousInput = {}, nextInput = {}) {
+  return Object.fromEntries(
+    Object.entries({
+      ...previousInput,
+      ...nextInput,
+    }).filter(([, value]) => value !== undefined && value !== null && value !== "")
+  );
+}
+
+function mergeClassificationWithConversation(classification, conversation) {
+  const previous = conversation.classification || {};
+  const previousInput = previous.actionInput || {};
+  const nextInput = classification.actionInput || {};
+  const mergedInput = mergeActionInput(previousInput, nextInput);
+  const hasPreviousContext = previous.userType && previous.userType !== "UNKNOWN";
+
+  if (classification.userType === "UNKNOWN" && hasPreviousContext) {
+    return {
+      ...classification,
+      userType: previous.userType,
+      confidence: Math.max(classification.confidence || 0, 0.7),
+      intent: classification.intent === "unknown" ? previous.intent || classification.intent : classification.intent,
+      summary: classification.summary || previous.summary,
+      action: classification.action || previous.action || null,
+      actionInput: mergedInput,
+      needsHuman: classification.needsHuman || previous.needsHuman || false,
+    };
+  }
+
+  return {
+    ...classification,
+    actionInput: mergedInput,
+  };
+}
+
+function actionNeedsCompetitionId(actionName) {
+  return [
+    "EXOTIMER_GET_COMPETITION_EVENTS",
+    "EXOTIMER_GET_TICKETS",
+    "EXOTIMER_GET_INSCRIPTION",
+    "EXOTIMER_GET_RESULTS",
+    "EXOTIMER_VALIDATE_PRE_RACE",
+    "EXOTIMER_GET_RAWS",
+    "EXOTIMER_CREATE_MANUAL_RAW",
+    "EXOTIMER_UPDATE_START_TIME",
+    "EXOTIMER_UPDATE_EVENT_TICKET",
+  ].includes(actionName);
+}
+
+async function resolveCompetitionForAction(userType, classification) {
+  const input = classification.actionInput || {};
+  if (!classification.action || !actionNeedsCompetitionId(classification.action)) {
+    return { classification, contextActionResult: null, contextActionError: null };
+  }
+
+  if (input.competitionId || input.competition_id || input.competition) {
+    return { classification, contextActionResult: null, contextActionError: null };
+  }
+
+  const competitionName = input.competitionName || input.name || input.query;
+  if (!competitionName) {
+    return { classification, contextActionResult: null, contextActionError: null };
+  }
+
+  try {
+    const result = await executeAction(userType, "EXOTIMER_FIND_COMPETITION", { competitionName }, { allowByPolicy: true });
+    if (!result?.match?.id) {
+      return { classification, contextActionResult: result, contextActionError: null };
+    }
+
+    return {
+      classification: {
+        ...classification,
+        actionInput: {
+          ...input,
+          competitionId: result.match.id,
+          competitionName: result.match.name || competitionName,
+        },
+      },
+      contextActionResult: {
+        action: "EXOTIMER_FIND_COMPETITION",
+        result,
+      },
+      contextActionError: null,
+    };
+  } catch (error) {
+    return { classification, contextActionResult: null, contextActionError: error.message };
+  }
+}
+
+function hasMinimumCorrectionContext(input = {}) {
+  const hasCompetition = Boolean(input.competitionId || input.competition_id || input.competitionName);
+  const hasPerson = Boolean(input.dorsal || input.bib || input.athleteName || input.name);
+  return hasCompetition && hasPerson;
+}
+
+function missingFieldsForAction(actionName, input = {}) {
+  const missing = [];
+  const hasCompetition = Boolean(input.competitionId || input.competition_id || input.competition);
+  const hasCompetitionName = Boolean(input.competitionName || input.name || input.query);
+
+  if (actionNeedsCompetitionId(actionName) && !hasCompetition) {
+    missing.push(hasCompetitionName ? "competitionId_resolved_from_name" : "competitionName");
+  }
+
+  if (actionName === "EXOTIMER_GET_INSCRIPTION" && !(input.dorsal || input.bib)) {
+    missing.push("dorsal");
+  }
+
+  return missing;
+}
+
 async function processInboundText({ waId, from, text, timestamp, rawPayload, displayName }) {
   const phone = normalizePhone(from);
 
@@ -46,12 +166,52 @@ async function processInboundText({ waId, from, text, timestamp, rawPayload, dis
     },
   });
 
-  const classification = await classifyMessage({
+  const recentMessages = await prisma.message.findMany({
+    where: { conversationId: conversation.id },
+    orderBy: { timestamp: "desc" },
+    take: 12,
+  });
+  const history = [...recentMessages].reverse().map(compactMessage);
+
+  let classification = await classifyMessage({
     text,
     forcedTimer: Boolean(timer),
+    previousClassification: conversation.classification,
+    previousUserType: conversation.userType,
+    conversationStatus: conversation.status,
+    history,
   });
+  classification = mergeClassificationWithConversation(classification, conversation);
 
   const userType = timer ? "TIMER" : classification.userType;
+  const contextResolution = await resolveCompetitionForAction(userType, classification);
+  classification = contextResolution.classification;
+
+  const missingFields = missingFieldsForAction(classification.action, classification.actionInput);
+  if (missingFields.length) {
+    classification = {
+      ...classification,
+      action: null,
+      needsHuman: false,
+      actionInput: {
+        ...(classification.actionInput || {}),
+        missingFields,
+      },
+      summary: `${classification.summary} Faltan datos para ejecutar la accion automatica.`,
+    };
+  }
+
+  if (
+    classification.action === "EXOTIMER_CREATE_RESULT_CORRECTION_CASE" &&
+    !hasMinimumCorrectionContext(classification.actionInput)
+  ) {
+    classification = {
+      ...classification,
+      action: null,
+      needsHuman: false,
+      summary: `${classification.summary} Faltan datos minimos para registrar el caso.`,
+    };
+  }
 
   await prisma.conversation.update({
     where: { id: conversation.id },
@@ -67,6 +227,8 @@ async function processInboundText({ waId, from, text, timestamp, rawPayload, dis
   let actionResult = null;
   let actionError = null;
   let actionPending = null;
+  const contextActionResult = contextResolution.contextActionResult;
+  const contextActionError = contextResolution.contextActionError;
 
   if (classification.action) {
     const policy = await getPolicy(userType, classification.action);
@@ -145,6 +307,9 @@ async function processInboundText({ waId, from, text, timestamp, rawPayload, dis
     actionResult,
     actionError,
     actionPending,
+    contextActionResult,
+    contextActionError,
+    history,
   });
 
   let sent = null;
@@ -165,6 +330,8 @@ async function processInboundText({ waId, from, text, timestamp, rawPayload, dis
         actionResult,
         actionError,
         actionPending,
+        contextActionResult,
+        contextActionError,
         providerMessageId: sent?.messages?.[0]?.id || null,
       },
       timestamp: new Date(),

@@ -103,7 +103,7 @@ function heuristicClassify(text, forcedTimer) {
   return fallbackClassification;
 }
 
-async function classifyMessage({ text, forcedTimer }) {
+async function classifyMessage({ text, forcedTimer, previousClassification, previousUserType, conversationStatus, history = [] }) {
   if (forcedTimer) return heuristicClassify(text, true);
 
   const client = getClient();
@@ -111,6 +111,7 @@ async function classifyMessage({ text, forcedTimer }) {
 
   const prompt = [
     "Clasifica un mensaje entrante de WhatsApp para Finisher Data, empresa de cronometraje electronico deportivo.",
+    "Debes razonar como una conversacion completa, no como mensajes aislados.",
     "Tipos de usuario:",
     "- TIMER: solo si el sistema ya lo identifico por telefono. No asumas TIMER por texto.",
     "- BUYER: solicita precios, cotizaciones o informacion comercial.",
@@ -123,12 +124,24 @@ async function classifyMessage({ text, forcedTimer }) {
         `- ${name}: ${meta.description}. Roles: ${meta.roles.join(", ")}. Riesgo: ${meta.risk}.`
     ),
     "Reglas:",
+    "- Usa el historial y la clasificacion anterior para entender mensajes cortos de continuidad como nombres, dorsales, confirmaciones o aclaraciones.",
+    "- Si el mensaje actual completa datos pedidos antes, conserva el userType, intent, action y actionInput anterior, agregando solo los datos nuevos.",
+    "- No cambies a UNKNOWN si el historial muestra claramente que la conversacion sigue siendo sobre el mismo caso.",
+    "- Extrae y conserva campos utiles: competitionName, competitionId, dorsal, bib, athleteName, requestedCorrection, eventName, ticketName, phone.",
     "- Usa action=null si faltan ids o datos esenciales.",
     "- Puedes usar EXOTIMER_FIND_COMPETITION si el usuario da nombre de competencia pero no id.",
+    "- Si el usuario da nombre de competencia y dorsal para resultados, puedes devolver EXOTIMER_GET_INSCRIPTION con competitionName y dorsal; el sistema resolvera competitionId.",
     "- No ejecutes cambios tecnicos, raws, tiempos ni tickets sin confirmacion humana: usa la accion, pero needsHuman=true.",
-    "- Para atletas, registra caso con EXOTIMER_CREATE_RESULT_CORRECTION_CASE; no cambies resultados directamente.",
+    "- Para atletas, consulta primero inscripcion/resultados cuando existan evento y dorsal. Registra EXOTIMER_CREATE_RESULT_CORRECTION_CASE solo cuando haya datos minimos del caso y una correccion/reporte concreto.",
     "- Para compradores, usa BUYER_CREATE_PRICE_INQUIRY; la cotizacion comercial vive fuera de Exotimer.",
-    `Mensaje: ${text}`,
+    "Contexto persistente:",
+    JSON.stringify({
+      previousUserType,
+      conversationStatus,
+      previousClassification,
+      history,
+    }),
+    `Mensaje actual: ${text}`,
   ].join("\n");
 
   const completion = await client.chat.completions.create({
@@ -171,7 +184,17 @@ function fallbackReply(userType) {
   return "Hola, gracias por escribir a Finisher Data. Cuentame si consultas por inscripciones o resultados de un evento?";
 }
 
-async function composeReply({ userType, text, classification, actionResult, actionError, actionPending }) {
+async function composeReply({
+  userType,
+  text,
+  classification,
+  actionResult,
+  actionError,
+  actionPending,
+  contextActionResult,
+  contextActionError,
+  history = [],
+}) {
   const client = getClient();
   if (!client) return fallbackReply(userType);
 
@@ -190,16 +213,19 @@ async function composeReply({ userType, text, classification, actionResult, acti
       {
         role: "system",
         content:
-          "Eres soporte de Finisher Data por WhatsApp. Responde en espanol, breve, amable y accionable. No inventes cambios realizados. Si falta informacion, pidela claramente. Si algo quedo pendiente de confirmacion humana, dilo sin afirmar que ya se cambio.",
+          "Eres soporte de Finisher Data por WhatsApp. Responde en espanol, breve, amable y accionable. Usa el historial para continuar el caso sin pedir de nuevo datos ya entregados. No inventes cambios realizados. Si falta informacion, pidela claramente. Si algo quedo pendiente de confirmacion humana, dilo sin afirmar que ya se cambio.",
       },
       {
         role: "user",
         content: JSON.stringify({
           userType,
           incomingMessage: text,
+          history,
           classification,
           actionStatus: status,
           actionResult,
+          contextActionResult,
+          contextActionError,
           actionPending,
         }),
       },

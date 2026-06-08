@@ -153,6 +153,27 @@ function normalizeText(value) {
     .trim();
 }
 
+function tokenize(value) {
+  return normalizeText(value)
+    .split(/[^a-z0-9]+/i)
+    .filter((token) => token.length > 2);
+}
+
+function competitionScore(competition, query) {
+  const name = normalizeText(competition.name);
+  const normalizedQuery = normalizeText(query);
+  if (!normalizedQuery) return 0;
+  if (name.includes(normalizedQuery)) return 100;
+
+  const queryTokens = tokenize(query);
+  const nameTokens = new Set(tokenize(competition.name));
+  if (!queryTokens.length) return 0;
+
+  const matched = queryTokens.filter((token) => nameTokens.has(token)).length;
+  const coverage = matched / queryTokens.length;
+  return coverage >= 0.6 ? Math.round(coverage * 90) : 0;
+}
+
 function pickCompetitionId(input) {
   const id = input.competitionId || input.competition_id || input.competition;
   if (!id) throw new Error("Falta competitionId.");
@@ -210,6 +231,7 @@ function flattenCompetitions(data) {
 
 async function findCompetition(input) {
   const query = normalizeText(input.competitionName || input.name || input.query);
+  const rawQuery = input.competitionName || input.name || input.query;
   const wantedId = input.competitionId || input.competition_id;
   const data = await listCompetitions();
   const competitions = flattenCompetitions(data);
@@ -221,8 +243,14 @@ async function findCompetition(input) {
 
   if (!query) return { match: null, candidates: competitions.slice(0, 10) };
 
-  const candidates = competitions.filter((item) => normalizeText(item.name).includes(query));
-  return { match: candidates[0] || null, candidates: candidates.slice(0, 10) };
+  const candidates = competitions
+    .map((item) => ({ item, score: competitionScore(item, rawQuery || query) }))
+    .filter(({ score }) => score > 0)
+    .sort((a, b) => b.score - a.score)
+    .map(({ item, score }) => ({ ...item, matchScore: score }));
+  const [best, second] = candidates;
+  const ambiguous = Boolean(best && second && best.matchScore === second.matchScore);
+  return { match: ambiguous ? null : best || null, candidates: candidates.slice(0, 10), ambiguous };
 }
 
 async function getCompetitionEvents(input) {
