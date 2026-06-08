@@ -26,10 +26,9 @@ ingress:
 services:
   - name: api
     environment_slug: node-js
-    github:
-      repo: jose1248299/soporte-exotimer
+    git:
+      repo_clone_url: https://github.com/jose1248299/soporte-exotimer.git
       branch: main
-      deploy_on_push: true
     build_command: npm install && npm run prisma:generate
     run_command: npm run prisma:deploy && npm run prisma:seed-policies && npm start
     http_port: 4000
@@ -88,10 +87,9 @@ services:
 static_sites:
   - name: web
     environment_slug: node-js
-    github:
-      repo: jose1248299/soporte-exotimer
+    git:
+      repo_clone_url: https://github.com/jose1248299/soporte-exotimer.git
       branch: main
-      deploy_on_push: true
     source_dir: frontend
     build_command: npm install && npm run build
     output_dir: dist
