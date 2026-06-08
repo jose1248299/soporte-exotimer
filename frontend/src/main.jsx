@@ -645,6 +645,19 @@ function SupportApp({ onBack }) {
   const [previewImage, setPreviewImage] = useState(null);
   const listLoaded = useRef(false);
   const chatRef = useRef(null);
+  const scrollModeRef = useRef("bottom");
+  const lastConversationIdRef = useRef(null);
+  const lastMessageKeyRef = useRef("");
+
+  function isNearChatBottom() {
+    const node = chatRef.current;
+    if (!node) return true;
+    return node.scrollHeight - node.scrollTop - node.clientHeight < 120;
+  }
+
+  function markScrollIntent(mode = "preserve") {
+    scrollModeRef.current = mode === "bottom" || isNearChatBottom() ? "bottom" : "preserve";
+  }
 
   const loadConversations = useCallback(async ({ silent = false } = {}) => {
     if (!silent) setLoadingList(true);
@@ -710,6 +723,7 @@ function SupportApp({ onBack }) {
   const loadMessages = useCallback(async (conversation, { silent = false } = {}) => {
     if (!conversation) return;
     if (!silent) setLoadingChat(true);
+    markScrollIntent(silent ? "preserve" : "bottom");
 
     if (String(conversation.id).startsWith("demo-")) {
       setMessages(MOCK_MESSAGES[conversation.id] || []);
@@ -744,8 +758,21 @@ function SupportApp({ onBack }) {
   }, [loadMessages, selected?.id]);
 
   useEffect(() => {
-    if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
-  }, [messages, selected]);
+    const node = chatRef.current;
+    if (!node) return;
+
+    const conversationChanged = selected?.id !== lastConversationIdRef.current;
+    const lastMessage = messages[messages.length - 1];
+    const messageKey = lastMessage ? `${lastMessage.id}-${lastMessage.timestamp}` : "";
+    const hasNewTailMessage = messageKey && messageKey !== lastMessageKeyRef.current;
+
+    if (conversationChanged || (hasNewTailMessage && scrollModeRef.current === "bottom")) {
+      node.scrollTop = node.scrollHeight;
+    }
+
+    lastConversationIdRef.current = selected?.id || null;
+    lastMessageKeyRef.current = messageKey;
+  }, [messages, selected?.id]);
 
   const stats = useMemo(() => {
     const total = conversations.length;
@@ -783,6 +810,7 @@ function SupportApp({ onBack }) {
 
     setSending(true);
     setDraft("");
+    markScrollIntent("bottom");
 
     const optimistic = {
       id: `local-${Date.now()}`,
