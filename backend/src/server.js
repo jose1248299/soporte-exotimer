@@ -6,6 +6,7 @@ const conversationsRouter = require("./routes/conversations");
 const timersRouter = require("./routes/timers");
 const actionsRouter = require("./routes/actions");
 const settingsRouter = require("./routes/settings");
+const exotimerSupportRouter = require("./routes/exotimerSupport");
 
 const app = express();
 
@@ -40,6 +41,7 @@ app.use("/api/conversations", conversationsRouter);
 app.use("/api/timers", timersRouter);
 app.use("/api/actions", actionsRouter);
 app.use("/api/settings", settingsRouter);
+app.use("/api/exotimer", exotimerSupportRouter);
 
 app.use((err, _req, res, _next) => {
   console.error("Unhandled error:", err);

@@ -2,6 +2,7 @@ const prisma = require("../lib/prisma");
 const { analyzeImageEvidence, classifyMessage, composeReply } = require("./ai");
 const { executeAction, requiresConfirmation } = require("./exotimerClient");
 const { getPolicy } = require("./supportPolicies");
+const { findOrCreateSupportCase, pickCompetitionId } = require("./supportCases");
 const { downloadMedia, sendTextMessage } = require("./waba");
 const { normalizePhone } = require("../utils/phone");
 
@@ -312,6 +313,24 @@ async function processInboundMessage({ waId, from, text = "", timestamp, rawPayl
     };
   }
 
+  const supportCase = await findOrCreateSupportCase({
+    conversationId: conversation.id,
+    userType,
+    classification,
+    timestamp,
+  });
+  const competitionId = supportCase?.competitionId || pickCompetitionId(classification.actionInput);
+
+  if (supportCase || competitionId) {
+    await prisma.message.update({
+      where: { id: inbound.id },
+      data: {
+        supportCaseId: supportCase?.id || null,
+        competitionId,
+      },
+    });
+  }
+
   await prisma.conversation.update({
     where: { id: conversation.id },
     data: {
@@ -334,6 +353,7 @@ async function processInboundMessage({ waId, from, text = "", timestamp, rawPayl
     const action = await prisma.supportAction.create({
       data: {
         conversationId: conversation.id,
+        supportCaseId: supportCase?.id || null,
         messageId: inbound.id,
         userType,
         name: classification.action,
@@ -421,6 +441,8 @@ async function processInboundMessage({ waId, from, text = "", timestamp, rawPayl
   await prisma.message.create({
     data: {
       conversationId: conversation.id,
+      supportCaseId: supportCase?.id || null,
+      competitionId: competitionId || null,
       direction: "OUTBOUND",
       phone,
       content: reply,
@@ -440,6 +462,7 @@ async function processInboundMessage({ waId, from, text = "", timestamp, rawPayl
   return {
     duplicated: false,
     conversationId: conversation.id,
+    supportCaseId: supportCase?.id || null,
     inboundMessageId: inbound.id,
     userType,
     reply,

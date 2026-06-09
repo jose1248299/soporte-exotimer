@@ -7,6 +7,8 @@ const router = express.Router();
 const messageSelect = {
   id: true,
   conversationId: true,
+  supportCaseId: true,
+  competitionId: true,
   waId: true,
   direction: true,
   contentType: true,

@@ -35,6 +35,13 @@ enum ConversationStatus {
   RESOLVED
 }
 
+enum SupportCaseStatus {
+  OPEN
+  WAITING_CLARIFICATION
+  WAITING_HUMAN
+  RESOLVED
+}
+
 enum SupportActionStatus {
   PROPOSED
   EXECUTED
@@ -69,6 +76,7 @@ model Conversation {
 
   messages Message[]
   actions  SupportAction[]
+  cases    SupportCase[]
 
   @@unique([channel, phone])
   @@index([phone])
@@ -77,9 +85,37 @@ model Conversation {
   @@index([lastMessageAt])
 }
 
+model SupportCase {
+  id             Int               @id @default(autoincrement())
+  conversationId Int
+  competitionId  Int?
+  status         SupportCaseStatus @default(OPEN)
+  userType       UserType          @default(UNKNOWN)
+  athleteName    String?
+  dorsal         String?
+  subject        String?
+  summary        String?
+  classification Json?
+  lastMessageAt  DateTime?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  conversation Conversation    @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  messages     Message[]
+  actions      SupportAction[]
+
+  @@index([conversationId])
+  @@index([competitionId])
+  @@index([status])
+  @@index([lastMessageAt])
+  @@index([competitionId, status, lastMessageAt])
+}
+
 model Message {
   id             Int              @id @default(autoincrement())
   conversationId Int
+  supportCaseId  Int?
+  competitionId  Int?
   waId           String?          @unique
   direction      MessageDirection
   contentType    MessageContentType @default(TEXT)
@@ -97,14 +133,18 @@ model Message {
   createdAt      DateTime         @default(now())
 
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  supportCase  SupportCase? @relation(fields: [supportCaseId], references: [id], onDelete: SetNull)
 
   @@index([conversationId, timestamp])
+  @@index([supportCaseId, timestamp])
+  @@index([competitionId, timestamp])
   @@index([phone])
 }
 
 model SupportAction {
   id             Int                 @id @default(autoincrement())
   conversationId Int
+  supportCaseId  Int?
   messageId      Int?
   userType       UserType
   name           String
@@ -116,8 +156,10 @@ model SupportAction {
   updatedAt      DateTime            @updatedAt
 
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  supportCase  SupportCase? @relation(fields: [supportCaseId], references: [id], onDelete: SetNull)
 
   @@index([conversationId])
+  @@index([supportCaseId])
   @@index([status])
   @@index([name])
 }
