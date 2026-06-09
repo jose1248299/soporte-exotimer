@@ -6,6 +6,7 @@ const conversationsRouter = require("./routes/conversations");
 const timersRouter = require("./routes/timers");
 const actionsRouter = require("./routes/actions");
 const settingsRouter = require("./routes/settings");
+const notificationsRouter = require("./routes/notifications");
 const exotimerSupportRouter = require("./routes/exotimerSupport");
 const { requireExotimerApiKey, requireFirebaseAuth } = require("./middleware/auth");
 
@@ -42,6 +43,7 @@ app.use("/api/conversations", requireFirebaseAuth, conversationsRouter);
 app.use("/api/timers", requireFirebaseAuth, timersRouter);
 app.use("/api/actions", requireFirebaseAuth, actionsRouter);
 app.use("/api/settings", requireFirebaseAuth, settingsRouter);
+app.use("/api/notifications", requireFirebaseAuth, notificationsRouter);
 app.use("/api/exotimer", requireExotimerApiKey, exotimerSupportRouter);
 
 app.use((err, _req, res, _next) => {

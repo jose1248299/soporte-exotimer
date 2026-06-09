@@ -21,6 +21,11 @@ const config = {
   security: {
     exotimerApiKey: process.env.SUPPORT_EXOTIMER_API_KEY,
   },
+  push: {
+    vapidSubject: process.env.PUSH_VAPID_SUBJECT || process.env.PUBLIC_BASE_URL || "mailto:soporte@finisherdata.com",
+    vapidPublicKey: process.env.PUSH_VAPID_PUBLIC_KEY,
+    vapidPrivateKey: process.env.PUSH_VAPID_PRIVATE_KEY,
+  },
   exotimer: {
     baseUrl: (process.env.EXOTIMER_API_BASE_URL || "").replace(/\/+$/, ""),
     token: process.env.EXOTIMER_API_TOKEN,

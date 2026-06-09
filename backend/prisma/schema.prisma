@@ -180,3 +180,19 @@ model SupportPolicy {
   @@index([userType])
   @@index([actionName])
 }
+
+model PushSubscription {
+  id        Int      @id @default(autoincrement())
+  uid       String?
+  email     String?
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  userAgent String?
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([uid])
+  @@index([active])
+}

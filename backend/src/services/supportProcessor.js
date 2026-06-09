@@ -2,6 +2,7 @@ const prisma = require("../lib/prisma");
 const { analyzeImageEvidence, classifyMessage, composeReply } = require("./ai");
 const { executeAction, requiresConfirmation } = require("./exotimerClient");
 const { getPolicy } = require("./supportPolicies");
+const { sendNewMessageNotification } = require("./pushNotifications");
 const { findOrCreateSupportCase, pickCompetitionId } = require("./supportCases");
 const { downloadMedia, sendTextMessage } = require("./waba");
 const { normalizePhone } = require("../utils/phone");
@@ -318,6 +319,14 @@ async function processInboundMessage({ waId, from, text = "", timestamp, rawPayl
       rawPayload,
       timestamp,
     },
+  });
+
+  sendNewMessageNotification({
+    conversation,
+    message: inbound,
+    userType: timer ? "TIMER" : conversation.userType,
+  }).catch((error) => {
+    console.warn("No se pudo enviar notificacion push:", error.message);
   });
 
   const recentMessages = await prisma.message.findMany({

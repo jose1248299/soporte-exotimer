@@ -182,6 +182,16 @@ button {
   background: #e1ece8;
 }
 
+.notification-trigger.active {
+  color: #0f604f;
+  background: #dff7ed;
+}
+
+.notification-trigger:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
 .app-shell {
   height: 100vh;
   min-height: 640px;

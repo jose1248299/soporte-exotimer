@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { createRoot } from "react-dom/client";
 import {
   ArrowLeft,
+  Bell,
   Bot,
   CheckCircle2,
   ClipboardCheck,
@@ -36,6 +37,17 @@ const USER_LABELS = {
 };
 
 const USER_TYPES = ["TIMER", "ORGANIZER", "ATHLETE", "BUYER", "UNKNOWN"];
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = `${base64String}${padding}`.replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = window.atob(base64);
+  return Uint8Array.from([...rawData].map((char) => char.charCodeAt(0)));
+}
+
+function supportsPushNotifications() {
+  return "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+}
 
 const MOCK_CONVERSATIONS = [
   {
@@ -689,6 +701,10 @@ function SupportApp({ onBack }) {
   const [configOpen, setConfigOpen] = useState(false);
   const [timersOpen, setTimersOpen] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const [pushStatus, setPushStatus] = useState(() => {
+    if (!supportsPushNotifications()) return "unsupported";
+    return Notification.permission === "granted" ? "enabled" : "default";
+  });
   const [previewImage, setPreviewImage] = useState(null);
   const listLoaded = useRef(false);
   const chatRef = useRef(null);
@@ -736,6 +752,12 @@ function SupportApp({ onBack }) {
       .finally(() => {
         if (!silent) setLoadingList(false);
       });
+  }, []);
+
+  useEffect(() => {
+    if ("clearAppBadge" in navigator) {
+      navigator.clearAppBadge().catch(() => {});
+    }
   }, []);
 
   useEffect(() => {
@@ -899,6 +921,51 @@ function SupportApp({ onBack }) {
     }
   }
 
+  async function enablePushNotifications() {
+    if (!supportsPushNotifications()) {
+      setPushStatus("unsupported");
+      return;
+    }
+
+    setPushStatus("loading");
+    try {
+      const permission = await Notification.requestPermission();
+      if (permission !== "granted") {
+        setPushStatus(permission === "denied" ? "denied" : "default");
+        return;
+      }
+
+      const keyResponse = await apiFetch("/api/notifications/public-key", { timeoutMs: 10000 });
+      if (!keyResponse.ok) throw new Error("No se pudo cargar clave push");
+      const keyData = await keyResponse.json();
+      if (!keyData.configured || !keyData.publicKey) throw new Error("Push no configurado en backend");
+
+      const registration = await navigator.serviceWorker.ready;
+      const existing = await registration.pushManager.getSubscription();
+      const subscription =
+        existing ||
+        (await registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(keyData.publicKey),
+        }));
+
+      const saveResponse = await apiFetch("/api/notifications/subscriptions", {
+        method: "POST",
+        body: JSON.stringify({ subscription }),
+        timeoutMs: 10000,
+      });
+      if (!saveResponse.ok) throw new Error("No se pudo guardar suscripcion push");
+
+      setPushStatus("enabled");
+      if ("clearAppBadge" in navigator) {
+        navigator.clearAppBadge().catch(() => {});
+      }
+    } catch (error) {
+      console.warn("No se pudieron activar notificaciones:", error);
+      setPushStatus("error");
+    }
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -915,6 +982,21 @@ function SupportApp({ onBack }) {
           </div>
         </div>
         <div className="topbar-actions">
+          <button
+            className={`status-chip config-trigger notification-trigger ${pushStatus === "enabled" ? "active" : ""}`}
+            onClick={enablePushNotifications}
+            disabled={pushStatus === "loading" || pushStatus === "unsupported"}
+            title={
+              pushStatus === "unsupported"
+                ? "Este navegador no soporta notificaciones push"
+                : pushStatus === "enabled"
+                  ? "Notificaciones activas"
+                  : "Activar notificaciones"
+            }
+          >
+            <Bell size={15} />
+            {pushStatus === "enabled" ? "Push" : pushStatus === "loading" ? "Activando" : "Notificar"}
+          </button>
           <button className="status-chip config-trigger" onClick={() => setTimersOpen(true)}>
             <UserCog size={15} />
             Timers
