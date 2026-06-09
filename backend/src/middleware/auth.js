@@ -31,12 +31,25 @@ async function requireFirebaseAuth(req, res, next) {
   }
 
   const token = extractBearer(req);
-  if (!token) return res.status(401).json({ error: "Token requerido" });
+  if (!token) {
+    console.warn("Firebase auth rejected: missing bearer token", {
+      path: req.originalUrl,
+      method: req.method,
+    });
+    return res.status(401).json({ error: "Token requerido" });
+  }
 
   try {
     req.user = await admin.auth(app).verifyIdToken(token);
     return next();
   } catch (error) {
+    console.warn("Firebase auth rejected: invalid token", {
+      path: req.originalUrl,
+      method: req.method,
+      code: error?.code,
+      message: error?.message,
+      projectId: config.firebase.projectId,
+    });
     return res.status(401).json({ error: "Token invalido" });
   }
 }
