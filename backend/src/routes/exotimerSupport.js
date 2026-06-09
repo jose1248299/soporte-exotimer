@@ -186,6 +186,12 @@ router.patch("/support-cases/:caseId", async (req, res) => {
   for (const field of ["athleteName", "dorsal", "subject", "summary"]) {
     if (req.body?.[field] !== undefined) data[field] = req.body[field] ? String(req.body[field]) : null;
   }
+  if (req.body?.detectedDorsals !== undefined) {
+    data.detectedDorsals = Array.isArray(req.body.detectedDorsals) ? req.body.detectedDorsals.map(String) : [];
+  }
+  if (req.body?.detectedAthletes !== undefined) {
+    data.detectedAthletes = Array.isArray(req.body.detectedAthletes) ? req.body.detectedAthletes : [];
+  }
 
   const supportCase = await prisma.supportCase.update({
     where: { id: caseId },
@@ -221,6 +227,8 @@ router.post("/messages/:messageId/assign", async (req, res) => {
       status: "OPEN",
       subject: req.body?.subject ? String(req.body.subject) : "Asignacion manual desde Exotimer",
       summary: req.body?.summary ? String(req.body.summary) : message.content,
+      detectedDorsals: Array.isArray(req.body?.detectedDorsals) ? req.body.detectedDorsals.map(String) : null,
+      detectedAthletes: Array.isArray(req.body?.detectedAthletes) ? req.body.detectedAthletes : null,
       lastMessageAt: message.timestamp,
     },
   });

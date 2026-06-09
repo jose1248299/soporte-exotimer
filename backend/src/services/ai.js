@@ -128,6 +128,8 @@ async function classifyMessage({ text, forcedTimer, previousClassification, prev
     "- Si el mensaje actual completa datos pedidos antes, conserva el userType, intent, action y actionInput anterior, agregando solo los datos nuevos.",
     "- No cambies a UNKNOWN si el historial muestra claramente que la conversacion sigue siendo sobre el mismo caso.",
     "- Extrae y conserva campos utiles: competitionName, competitionId, dorsal, bib, athleteName, requestedCorrection, eventName, ticketName, phone.",
+    "- Si el usuario menciona varios dorsales o varias personas del equipo, NO dividas el caso. Devuelve detectedDorsals como array de strings y detectedAthletes como array de objetos {name,dorsal} cuando puedas.",
+    "- Conserva detectedDorsals y detectedAthletes previos del contexto, agregando nuevos sin perder los anteriores.",
     "- Usa action=null si faltan ids o datos esenciales.",
     "- Puedes usar EXOTIMER_FIND_COMPETITION si el usuario da nombre de competencia pero no id.",
     "- Si el usuario da nombre de competencia y dorsal para resultados, puedes devolver EXOTIMER_GET_INSCRIPTION con competitionName y dorsal; el sistema resolvera competitionId.",

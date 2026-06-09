@@ -93,6 +93,8 @@ model SupportCase {
   userType       UserType          @default(UNKNOWN)
   athleteName    String?
   dorsal         String?
+  detectedDorsals Json?
+  detectedAthletes Json?
   subject        String?
   summary        String?
   classification Json?

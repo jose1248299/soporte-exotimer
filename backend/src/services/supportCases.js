@@ -18,6 +18,72 @@ function pickAthleteName(input = {}) {
   return value == null || value === "" ? null : String(value);
 }
 
+function asArray(value) {
+  if (Array.isArray(value)) return value;
+  if (value == null || value === "") return [];
+  return [value];
+}
+
+function uniqueStrings(values) {
+  return [...new Set(values.map((value) => String(value).trim()).filter(Boolean))];
+}
+
+function normalizeAthlete(value) {
+  if (!value) return null;
+  if (typeof value === "string") return { name: value, dorsal: null };
+  if (typeof value !== "object") return null;
+
+  const name = value.name || value.athleteName || value.participant || null;
+  const dorsal = value.dorsal || value.bib || null;
+  if (!name && !dorsal) return null;
+  return {
+    name: name ? String(name) : null,
+    dorsal: dorsal ? String(dorsal) : null,
+  };
+}
+
+function mergeDorsals(existing = [], input = {}) {
+  const athletes = [
+    ...asArray(input.detectedAthletes),
+    ...asArray(input.athletes),
+    ...asArray(input.participants),
+  ]
+    .map(normalizeAthlete)
+    .filter(Boolean);
+
+  return uniqueStrings([
+    ...asArray(existing),
+    ...asArray(input.detectedDorsals),
+    ...asArray(input.dorsals),
+    ...asArray(input.bibs),
+    input.dorsal,
+    input.bib,
+    ...athletes.map((athlete) => athlete.dorsal),
+  ]);
+}
+
+function mergeAthletes(existing = [], input = {}) {
+  const current = asArray(existing).map(normalizeAthlete).filter(Boolean);
+  const incoming = [
+    ...asArray(input.detectedAthletes),
+    ...asArray(input.athletes),
+    ...asArray(input.participants),
+    normalizeAthlete({ name: input.athleteName || input.participant || input.name, dorsal: input.dorsal || input.bib }),
+  ].filter(Boolean);
+
+  const byKey = new Map();
+  for (const athlete of [...current, ...incoming]) {
+    const key = athlete.dorsal || athlete.name;
+    if (!key) continue;
+    byKey.set(String(key), {
+      name: athlete.name || byKey.get(String(key))?.name || null,
+      dorsal: athlete.dorsal || byKey.get(String(key))?.dorsal || null,
+    });
+  }
+
+  return [...byKey.values()];
+}
+
 function buildSubject(classification = {}) {
   const input = classification.actionInput || {};
   if (classification.intent) return String(classification.intent);
@@ -44,7 +110,6 @@ async function findOrCreateSupportCase({ conversationId, userType, classificatio
     conversationId,
     competitionId,
     status: { in: OPEN_CASE_STATUSES },
-    ...(dorsal ? { dorsal } : {}),
   };
 
   const existing = await prisma.supportCase.findFirst({
@@ -57,6 +122,8 @@ async function findOrCreateSupportCase({ conversationId, userType, classificatio
     status: statusFromClassification(classification),
     athleteName: athleteName || existing?.athleteName || null,
     dorsal: dorsal || existing?.dorsal || null,
+    detectedDorsals: mergeDorsals(existing?.detectedDorsals, input),
+    detectedAthletes: mergeAthletes(existing?.detectedAthletes, input),
     subject: buildSubject(classification),
     summary: classification?.summary || existing?.summary || null,
     classification,
