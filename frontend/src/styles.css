@@ -397,6 +397,17 @@ button {
   color: #172033;
 }
 
+.filter-button {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  place-items: center;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  color: #0f604f;
+  background: #ffffff;
+}
+
 .type-tabs {
   display: flex;
   gap: 6px;
@@ -1134,6 +1145,68 @@ button {
   background: #ffffff;
 }
 
+.filter-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  align-items: end;
+  background: rgba(15, 23, 42, 0.36);
+}
+
+.filter-drawer {
+  width: 100%;
+  display: grid;
+  gap: 14px;
+  border-radius: 16px 16px 0 0;
+  padding: 10px 14px 18px;
+  background: #ffffff;
+  box-shadow: 0 -18px 60px rgba(15, 23, 42, 0.22);
+}
+
+.filter-drawer-handle {
+  width: 44px;
+  height: 4px;
+  justify-self: center;
+  border-radius: 999px;
+  background: #cbd5e1;
+}
+
+.filter-drawer header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.filter-drawer h2 {
+  margin: 0;
+  color: #111827;
+  font-size: 18px;
+}
+
+.filter-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.filter-options button {
+  min-height: 42px;
+  border: 1px solid #d7dee8;
+  border-radius: 8px;
+  padding: 0 12px;
+  color: #344256;
+  background: #ffffff;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.filter-options button.active {
+  color: #ffffff;
+  border-color: #12725d;
+  background: #12725d;
+}
+
 .config-note {
   margin-right: auto;
   color: #64748b;
@@ -1237,7 +1310,11 @@ button {
   }
 
   .type-tabs {
-    padding: 0 10px 10px;
+    display: none;
+  }
+
+  .conversation-pane .pane-header {
+    display: none;
   }
 
   .conversation-list {
@@ -1415,6 +1492,11 @@ button {
     border: 0;
     border-radius: 0;
     box-shadow: none;
+  }
+
+  .search-box {
+    height: 48px;
+    margin: 10px;
   }
 
   .pane-header h2,

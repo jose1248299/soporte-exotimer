@@ -5,6 +5,7 @@ import {
   Bot,
   CheckCircle2,
   ClipboardCheck,
+  Filter,
   Headphones,
   Image as ImageIcon,
   LockKeyhole,
@@ -19,10 +20,8 @@ import {
 } from "lucide-react";
 import {
   auth,
-  googleProvider,
   onAuthStateChanged,
   signInWithEmailAndPassword,
-  signInWithPopup,
   signOut,
 } from "./firebase.js";
 import { apiBlobUrl, apiFetch, setAuthTokenProvider } from "./utils/api.js";
@@ -254,18 +253,6 @@ function LoginScreen() {
     }
   }
 
-  async function handleGoogleLogin() {
-    setLoading(true);
-    setError("");
-    try {
-      await signInWithPopup(auth, googleProvider);
-    } catch {
-      setError("No se pudo iniciar sesion con Google.");
-    } finally {
-      setLoading(false);
-    }
-  }
-
   return (
     <main className="login-shell">
       <section className="login-panel">
@@ -293,10 +280,6 @@ function LoginScreen() {
           <button className="primary-action" disabled={loading || !email.trim() || !password}>
             <LockKeyhole size={18} />
             {loading ? "Ingresando..." : "Ingresar"}
-          </button>
-          <button className="secondary-action" type="button" onClick={handleGoogleLogin} disabled={loading}>
-            <ShieldCheck size={18} />
-            Google
           </button>
         </form>
 
@@ -705,6 +688,7 @@ function SupportApp({ onBack }) {
   const [pendingActions, setPendingActions] = useState([]);
   const [configOpen, setConfigOpen] = useState(false);
   const [timersOpen, setTimersOpen] = useState(false);
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [previewImage, setPreviewImage] = useState(null);
   const listLoaded = useRef(false);
   const chatRef = useRef(null);
@@ -994,6 +978,14 @@ function SupportApp({ onBack }) {
               onChange={(event) => setQuery(event.target.value)}
               placeholder="Buscar cliente o telefono"
             />
+            <button
+              className="filter-button mobile-only"
+              type="button"
+              onClick={() => setFiltersOpen(true)}
+              title="Filtros"
+            >
+              <Filter size={18} />
+            </button>
           </div>
 
           <div className="type-tabs">
@@ -1113,6 +1105,36 @@ function SupportApp({ onBack }) {
 
       <TimersModal open={timersOpen} onClose={() => setTimersOpen(false)} />
       <ConfigurationModal open={configOpen} onClose={() => setConfigOpen(false)} />
+      {filtersOpen && (
+        <div className="filter-drawer-backdrop mobile-only" role="dialog" aria-modal="true" onClick={() => setFiltersOpen(false)}>
+          <section className="filter-drawer" onClick={(event) => event.stopPropagation()}>
+            <div className="filter-drawer-handle" />
+            <header>
+              <div>
+                <p className="eyebrow">Filtros</p>
+                <h2>Conversaciones</h2>
+              </div>
+              <button className="icon-button" type="button" onClick={() => setFiltersOpen(false)} title="Cerrar">
+                <ArrowLeft size={18} />
+              </button>
+            </header>
+            <div className="filter-options">
+              {["ALL", "TIMER", "BUYER", "ORGANIZER", "ATHLETE"].map((type) => (
+                <button
+                  key={type}
+                  className={typeFilter === type ? "active" : ""}
+                  onClick={() => {
+                    setTypeFilter(type);
+                    setFiltersOpen(false);
+                  }}
+                >
+                  {type === "ALL" ? "Todos" : USER_LABELS[type]}
+                </button>
+              ))}
+            </div>
+          </section>
+        </div>
+      )}
       {previewImage && (
         <div className="image-preview-backdrop" role="dialog" aria-modal="true" onClick={() => setPreviewImage(null)}>
           <figure className="image-preview" onClick={(event) => event.stopPropagation()}>
