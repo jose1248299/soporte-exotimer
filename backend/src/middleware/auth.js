@@ -1,4 +1,5 @@
-const admin = require("firebase-admin");
+const { initializeApp } = require("firebase-admin/app");
+const { getAuth } = require("firebase-admin/auth");
 const config = require("../config");
 
 let firebaseApp = null;
@@ -7,7 +8,7 @@ function getFirebaseApp() {
   if (firebaseApp) return firebaseApp;
   if (!config.firebase.projectId) return null;
 
-  firebaseApp = admin.initializeApp({
+  firebaseApp = initializeApp({
     projectId: config.firebase.projectId,
   });
   return firebaseApp;
@@ -40,7 +41,7 @@ async function requireFirebaseAuth(req, res, next) {
   }
 
   try {
-    req.user = await admin.auth(app).verifyIdToken(token);
+    req.user = await getAuth(app).verifyIdToken(token);
     return next();
   } catch (error) {
     console.warn("Firebase auth rejected: invalid token", {
