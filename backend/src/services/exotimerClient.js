@@ -51,6 +51,21 @@ const ACTIONS = {
     risk: SAFE_WRITE,
     description: "Registra una solicitud de correccion para revision humana.",
   },
+  EXOTIMER_UPDATE_RESULT_PARTICIPANT_DATA: {
+    roles: ["ATHLETE", "TIMER"],
+    risk: SAFE_WRITE,
+    description: "Actualiza datos personales del participante en un resultado.",
+  },
+  EXOTIMER_UPDATE_RESULT_DORSAL: {
+    roles: ["ATHLETE", "TIMER"],
+    risk: SAFE_WRITE,
+    description: "Actualiza el numero de dorsal de un participante en un resultado.",
+  },
+  EXOTIMER_UPDATE_RESULT_EVENT_CATEGORY: {
+    roles: ["ATHLETE", "TIMER"],
+    risk: SAFE_WRITE,
+    description: "Actualiza distancia, genero y/o categoria de un resultado.",
+  },
   EXOTIMER_VALIDATE_PRE_RACE: {
     roles: ["TIMER"],
     risk: SAFE_READ,
@@ -385,6 +400,197 @@ async function getResultDetail(input) {
   return apiRequest({ path: `/v2/results/detail/${ids.map(String).join(",")}/` });
 }
 
+function asArray(value) {
+  if (Array.isArray(value)) return value;
+  if (Array.isArray(value?.results)) return value.results;
+  if (Array.isArray(value?.data)) return value.data;
+  if (Array.isArray(value?.items)) return value.items;
+  if (Array.isArray(value?.rows)) return value.rows;
+  if (value?.results && typeof value.results === "object") return asArray(value.results);
+  if (value?.data && typeof value.data === "object") return asArray(value.data);
+  if (value && typeof value === "object") return [value];
+  return [];
+}
+
+function firstDetail(value) {
+  if (value?.result) return firstDetail(value.result);
+  if (value?.detail) return firstDetail(value.detail);
+  if (value?.data && typeof value.data === "object" && !Array.isArray(value.data)) return firstDetail(value.data);
+  const rows = asArray(value);
+  if (rows.length) return rows[0];
+  return value;
+}
+
+function pickResultId(row) {
+  return row?.id || row?.result_id || row?.resultId || row?.pk;
+}
+
+function pickLookupDorsal(input = {}) {
+  return input.currentDorsal || input.oldDorsal || input.previousDorsal || input.dorsal || input.bib;
+}
+
+async function resolveResultForUpdate(input = {}) {
+  const directId = input.resultId || input.result_id || input.id;
+  if (directId) {
+    const detail = firstDetail(await getResultDetail({ resultId: directId }));
+    return { resultId: directId, detail };
+  }
+
+  const dorsal = pickLookupDorsal(input);
+  if (!dorsal) throw new Error("Falta dorsal o resultId para ubicar el resultado.");
+
+  const rows = asArray(await getResults(input));
+  const matches = rows.filter((row) => {
+    const rowDorsal = row?.dorsal ?? row?.bib ?? row?.participant?.dorsal;
+    return String(rowDorsal) === String(dorsal);
+  });
+
+  if (!matches.length) throw new Error(`No se encontro resultado con dorsal ${dorsal}.`);
+  if (matches.length > 1) throw new Error(`Se encontraron varios resultados con dorsal ${dorsal}.`);
+
+  const resultId = pickResultId(matches[0]);
+  if (!resultId) throw new Error("El resultado encontrado no incluye id.");
+
+  const detail = firstDetail(await getResultDetail({ resultId }));
+  return { resultId, detail };
+}
+
+function numberOrString(value) {
+  if (value === undefined || value === null || value === "") return value;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : String(value);
+}
+
+function clean(value) {
+  if (value === undefined || value === null || value === "") return undefined;
+  return String(value).trim();
+}
+
+function requestedValue(input = {}) {
+  return clean(
+    input.requestedValue ??
+      input.correctValue ??
+      input.newValue ??
+      input.valorCorrecto ??
+      input.valor_solicitado ??
+      input.value
+  );
+}
+
+function targetIncludes(input = {}, words = []) {
+  const target = normalizeText(
+    [
+      input.targetField,
+      input.field,
+      input.campo,
+      input.caseType,
+      input.tipoCaso,
+      input.requestedCorrection,
+      input.message,
+    ]
+      .filter(Boolean)
+      .join(" ")
+  );
+  return words.some((word) => target.includes(normalizeText(word)));
+}
+
+function applyRequestedValueByMode(input = {}, patch = {}, mode) {
+  const requested = requestedValue(input);
+  if (!requested) return patch;
+
+  if (mode === "dorsal" || targetIncludes(input, ["dorsal", "bib"])) {
+    patch.dorsal = requested;
+  }
+
+  if (mode === "event_category") {
+    if (targetIncludes(input, ["distancia", "evento"])) patch.evento_distancia = requested;
+    if (targetIncludes(input, ["genero", "sexo"])) patch.genero = requested;
+    if (targetIncludes(input, ["categoria"])) patch.categoria = requested;
+  }
+
+  if (mode === "participant_data") {
+    if (targetIncludes(input, ["nombre"]) && !targetIncludes(input, ["apellido"])) patch.participantName = requested;
+    if (targetIncludes(input, ["apellido"])) patch.participantLastname = requested;
+  }
+
+  return patch;
+}
+
+function buildResultParticipantForm({ input, resultId, detail, mode }) {
+  const participant = detail?.participant || {};
+  const event = detail?.event || {};
+  const category = event?.category || detail?.category || {};
+  const patch = applyRequestedValueByMode(input, {}, mode);
+
+  const nextDorsal = input.newDorsal ?? input.dorsalNew ?? input.correctDorsal ?? patch.dorsal;
+  const participantName = clean(input.participantName ?? input.athleteName ?? input.nameNew ?? input.firstName ?? patch.participantName);
+  const participantLastname = clean(
+    input.participantLastname ?? input.lastnameNew ?? input.lastName ?? input.lastname ?? input.surname ?? patch.participantLastname
+  );
+  const eventName = clean(input.newDistance ?? input.distanceNew ?? input.evento_distancia ?? input.distance ?? input.eventName ?? patch.evento_distancia);
+  const gender = clean(input.newGender ?? input.genderNew ?? input.genero ?? input.gender ?? input.genre ?? patch.genero);
+  const categoryName = clean(input.newCategory ?? input.categoryNew ?? input.categoria ?? input.category ?? input.categoryName ?? patch.categoria);
+
+  return {
+    result_id: resultId,
+    selectedIds: [resultId],
+    id_competicion: Number(pickCompetitionId(input)),
+    dorsal: numberOrString(nextDorsal ?? detail?.dorsal ?? detail?.bib),
+    chip: numberOrString(input.chip ?? detail?.chip ?? nextDorsal ?? detail?.dorsal ?? detail?.bib),
+    participantName: participantName ?? participant.name ?? detail?.participantName ?? detail?.athleteName,
+    participantLastname: participantLastname ?? participant.lastname ?? detail?.participantLastname ?? detail?.lastname,
+    evento_distancia: eventName ?? event.name ?? detail?.evento_distancia ?? detail?.distance,
+    genero: gender ?? category.genre ?? detail?.genero ?? detail?.gender,
+    categoria: categoryName ?? category.name ?? detail?.categoria ?? detail?.category,
+    salida: input.salida ?? input.outputName ?? input.startName ?? detail?.salida ?? detail?.outputName,
+  };
+}
+
+async function updateResultParticipant(input, mode) {
+  const { resultId, detail } = await resolveResultForUpdate(input);
+  const form = buildResultParticipantForm({ input, resultId, detail, mode });
+
+  const required = ["dorsal", "participantName", "participantLastname", "evento_distancia", "genero", "categoria"];
+  const missing = required.filter((key) => form[key] === undefined || form[key] === null || form[key] === "");
+  if (missing.length) throw new Error(`Faltan datos del resultado para actualizar: ${missing.join(", ")}`);
+
+  const saved = await apiRequest({
+    method: "POST",
+    path: "/v2/results/update-participant/",
+    data: form,
+  });
+
+  return {
+    saved,
+    changed: {
+      competitionId: pickCompetitionId(input),
+      resultId,
+      mode,
+      before: {
+        dorsal: detail?.dorsal ?? detail?.bib,
+        participantName: detail?.participant?.name ?? detail?.participantName ?? detail?.athleteName,
+        participantLastname: detail?.participant?.lastname ?? detail?.participantLastname ?? detail?.lastname,
+        evento_distancia: detail?.event?.name ?? detail?.evento_distancia ?? detail?.distance,
+        genero: detail?.event?.category?.genre ?? detail?.genero ?? detail?.gender,
+        categoria: detail?.event?.category?.name ?? detail?.categoria ?? detail?.category,
+      },
+      after: form,
+    },
+  };
+}
+
+async function updateResultParticipantData(input) {
+  return updateResultParticipant(input, "participant_data");
+}
+
+async function updateResultDorsal(input) {
+  return updateResultParticipant(input, "dorsal");
+}
+
+async function updateResultEventCategory(input) {
+  return updateResultParticipant(input, "event_category");
+}
+
 async function validatePreRace(input) {
   return apiRequest({ path: `/v2/results/validate/${pickCompetitionId(input)}/` });
 }
@@ -497,6 +703,9 @@ const HANDLERS = {
   EXOTIMER_GET_RESULTS: getResults,
   EXOTIMER_GET_RESULT_DETAIL: getResultDetail,
   EXOTIMER_CREATE_RESULT_CORRECTION_CASE: createResultCorrectionCase,
+  EXOTIMER_UPDATE_RESULT_PARTICIPANT_DATA: updateResultParticipantData,
+  EXOTIMER_UPDATE_RESULT_DORSAL: updateResultDorsal,
+  EXOTIMER_UPDATE_RESULT_EVENT_CATEGORY: updateResultEventCategory,
   EXOTIMER_VALIDATE_PRE_RACE: validatePreRace,
   EXOTIMER_GET_RAWS: getRaws,
   EXOTIMER_CREATE_MANUAL_RAW: createManualRaw,

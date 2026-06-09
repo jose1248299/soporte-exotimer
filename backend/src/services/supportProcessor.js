@@ -77,6 +77,9 @@ function actionNeedsCompetitionId(actionName) {
     "EXOTIMER_GET_TICKETS",
     "EXOTIMER_GET_INSCRIPTION",
     "EXOTIMER_GET_RESULTS",
+    "EXOTIMER_UPDATE_RESULT_PARTICIPANT_DATA",
+    "EXOTIMER_UPDATE_RESULT_DORSAL",
+    "EXOTIMER_UPDATE_RESULT_EVENT_CATEGORY",
     "EXOTIMER_VALIDATE_PRE_RACE",
     "EXOTIMER_GET_RAWS",
     "EXOTIMER_CREATE_MANUAL_RAW",
@@ -136,6 +139,11 @@ function missingFieldsForAction(actionName, input = {}) {
   const missing = [];
   const hasCompetition = Boolean(input.competitionId || input.competition_id || input.competition);
   const hasCompetitionName = Boolean(input.competitionName || input.name || input.query);
+  const resultUpdateActions = [
+    "EXOTIMER_UPDATE_RESULT_PARTICIPANT_DATA",
+    "EXOTIMER_UPDATE_RESULT_DORSAL",
+    "EXOTIMER_UPDATE_RESULT_EVENT_CATEGORY",
+  ];
 
   if (actionNeedsCompetitionId(actionName) && !hasCompetition) {
     missing.push(hasCompetitionName ? "competitionId_resolved_from_name" : "competitionName");
@@ -143,6 +151,58 @@ function missingFieldsForAction(actionName, input = {}) {
 
   if (actionName === "EXOTIMER_GET_INSCRIPTION" && !(input.dorsal || input.bib)) {
     missing.push("dorsal");
+  }
+
+  if (resultUpdateActions.includes(actionName)) {
+    const hasResultReference = Boolean(
+      input.resultId ||
+        input.result_id ||
+        input.id ||
+        input.dorsal ||
+        input.bib ||
+        input.currentDorsal ||
+        input.oldDorsal ||
+        input.previousDorsal
+    );
+    if (!hasResultReference) missing.push("dorsal_or_resultId");
+
+    if (actionName === "EXOTIMER_UPDATE_RESULT_DORSAL") {
+      const hasNewDorsal = Boolean(input.newDorsal || input.dorsalNew || input.correctDorsal || input.requestedValue || input.newValue);
+      if (!hasNewDorsal) missing.push("newDorsal");
+    }
+
+    if (actionName === "EXOTIMER_UPDATE_RESULT_EVENT_CATEGORY") {
+      const hasEventPatch = Boolean(
+        input.newDistance ||
+          input.distanceNew ||
+          input.evento_distancia ||
+          input.newGender ||
+          input.genderNew ||
+          input.genero ||
+          input.newCategory ||
+          input.categoryNew ||
+          input.categoria ||
+          input.requestedValue ||
+          input.newValue
+      );
+      if (!hasEventPatch) missing.push("distance_gender_or_category");
+    }
+
+    if (actionName === "EXOTIMER_UPDATE_RESULT_PARTICIPANT_DATA") {
+      const hasParticipantPatch = Boolean(
+        input.participantName ||
+          input.athleteName ||
+          input.nameNew ||
+          input.firstName ||
+          input.participantLastname ||
+          input.lastnameNew ||
+          input.lastName ||
+          input.lastname ||
+          input.requestedValue ||
+          input.newValue
+      );
+      if (!hasParticipantPatch) missing.push("participantData");
+    }
   }
 
   return missing;
