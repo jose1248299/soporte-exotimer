@@ -15,6 +15,12 @@ const config = {
     apiKey: process.env.OPENAI_API_KEY,
     model: process.env.OPENAI_MODEL || "gpt-4.1",
   },
+  firebase: {
+    projectId: process.env.FIREBASE_PROJECT_ID,
+  },
+  security: {
+    exotimerApiKey: process.env.SUPPORT_EXOTIMER_API_KEY,
+  },
   exotimer: {
     baseUrl: (process.env.EXOTIMER_API_BASE_URL || "").replace(/\/+$/, ""),
     token: process.env.EXOTIMER_API_TOKEN,

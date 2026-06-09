@@ -17,7 +17,15 @@ import {
   UserRound,
   Zap,
 } from "lucide-react";
-import { apiFetch, apiUrl } from "./utils/api.js";
+import {
+  auth,
+  googleProvider,
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  signInWithPopup,
+  signOut,
+} from "./firebase.js";
+import { apiBlobUrl, apiFetch, setAuthTokenProvider } from "./utils/api.js";
 import "./styles.css";
 
 const USER_LABELS = {
@@ -178,11 +186,29 @@ function normalizeConversation(item) {
   };
 }
 
-function mediaUrl(message) {
-  return apiUrl(`/api/conversations/messages/${message.id}/media`);
-}
-
 function MessageMedia({ message, onPreview }) {
+  const [imageUrl, setImageUrl] = useState("");
+
+  useEffect(() => {
+    if (message.contentType !== "IMAGE" || !message.mediaId) return undefined;
+    let active = true;
+    let objectUrl = "";
+
+    apiBlobUrl(`/api/conversations/messages/${message.id}/media`)
+      .then((url) => {
+        objectUrl = url;
+        if (active) setImageUrl(url);
+      })
+      .catch(() => {
+        if (active) setImageUrl("");
+      });
+
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [message.id, message.contentType, message.mediaId]);
+
   if (message.contentType !== "IMAGE" || !message.mediaId) return null;
 
   return (
@@ -190,10 +216,14 @@ function MessageMedia({ message, onPreview }) {
       <button
         className="message-media-preview"
         type="button"
-        onClick={() => onPreview?.(message)}
+        onClick={() => onPreview?.({ message, imageUrl })}
         title="Abrir imagen"
       >
-        <img src={mediaUrl(message)} alt={message.content || "Imagen enviada por WhatsApp"} loading="lazy" />
+        {imageUrl ? (
+          <img src={imageUrl} alt={message.content || "Imagen enviada por WhatsApp"} loading="lazy" />
+        ) : (
+          <span className="message-media-placeholder">Cargando imagen...</span>
+        )}
       </button>
       {message.mediaAnalysis?.summary && (
         <figcaption>
@@ -205,7 +235,37 @@ function MessageMedia({ message, onPreview }) {
   );
 }
 
-function LoginScreen({ onContinue }) {
+function LoginScreen() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  async function handleEmailLogin(event) {
+    event.preventDefault();
+    setLoading(true);
+    setError("");
+    try {
+      await signInWithEmailAndPassword(auth, email.trim(), password);
+    } catch {
+      setError("No se pudo iniciar sesion. Revisa el correo y la contrasena.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleGoogleLogin() {
+    setLoading(true);
+    setError("");
+    try {
+      await signInWithPopup(auth, googleProvider);
+    } catch {
+      setError("No se pudo iniciar sesion con Google.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
     <main className="login-shell">
       <section className="login-panel">
@@ -220,20 +280,25 @@ function LoginScreen({ onContinue }) {
           </p>
         </div>
 
-        <div className="fake-form" aria-label="Login simulado">
+        <form className="fake-form" aria-label="Login" onSubmit={handleEmailLogin}>
           <label>
             Correo
-            <input value="soporte@finisherdata.com" readOnly />
+            <input value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" />
           </label>
           <label>
             Contrasena
-            <input value="********" type="password" readOnly />
+            <input value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete="current-password" />
           </label>
-          <button className="primary-action" onClick={onContinue}>
+          {error && <div className="inline-alert login-error">{error}</div>}
+          <button className="primary-action" disabled={loading || !email.trim() || !password}>
             <LockKeyhole size={18} />
-            Continuar
+            {loading ? "Ingresando..." : "Ingresar"}
           </button>
-        </div>
+          <button className="secondary-action" type="button" onClick={handleGoogleLogin} disabled={loading}>
+            <ShieldCheck size={18} />
+            Google
+          </button>
+        </form>
 
         <div className="login-meta">
           <span>
@@ -1051,9 +1116,9 @@ function SupportApp({ onBack }) {
       {previewImage && (
         <div className="image-preview-backdrop" role="dialog" aria-modal="true" onClick={() => setPreviewImage(null)}>
           <figure className="image-preview" onClick={(event) => event.stopPropagation()}>
-            <img src={mediaUrl(previewImage)} alt={previewImage.content || "Imagen enviada por WhatsApp"} />
+            <img src={previewImage.imageUrl} alt={previewImage.message.content || "Imagen enviada por WhatsApp"} />
             <figcaption>
-              <span>{previewImage.mediaAnalysis?.summary || "Imagen enviada por WhatsApp"}</span>
+              <span>{previewImage.message.mediaAnalysis?.summary || "Imagen enviada por WhatsApp"}</span>
               <button type="button" onClick={() => setPreviewImage(null)}>Cerrar</button>
             </figcaption>
           </figure>
@@ -1064,11 +1129,38 @@ function SupportApp({ onBack }) {
 }
 
 function App() {
-  const [screen, setScreen] = useState("login");
-  return screen === "login" ? (
-    <LoginScreen onContinue={() => setScreen("support")} />
+  const [user, setUser] = useState(null);
+  const [checkingAuth, setCheckingAuth] = useState(true);
+
+  useEffect(() => {
+    setAuthTokenProvider(async () => {
+      if (!auth.currentUser) return null;
+      return auth.currentUser.getIdToken();
+    });
+
+    return onAuthStateChanged(auth, (nextUser) => {
+      setUser(nextUser);
+      setCheckingAuth(false);
+    });
+  }, []);
+
+  if (checkingAuth) {
+    return (
+      <main className="login-shell">
+        <section className="login-panel">
+          <div className="brand-mark">
+            <Zap size={26} />
+          </div>
+          <p className="login-copy">Validando sesion...</p>
+        </section>
+      </main>
+    );
+  }
+
+  return user ? (
+    <SupportApp onBack={() => signOut(auth)} />
   ) : (
-    <SupportApp onBack={() => setScreen("login")} />
+    <LoginScreen />
   );
 }
 

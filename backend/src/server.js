@@ -7,6 +7,7 @@ const timersRouter = require("./routes/timers");
 const actionsRouter = require("./routes/actions");
 const settingsRouter = require("./routes/settings");
 const exotimerSupportRouter = require("./routes/exotimerSupport");
+const { requireExotimerApiKey, requireFirebaseAuth } = require("./middleware/auth");
 
 const app = express();
 
@@ -37,11 +38,11 @@ app.get("/health/db", async (_req, res) => {
 });
 
 app.use("/api/webhook", webhookRouter);
-app.use("/api/conversations", conversationsRouter);
-app.use("/api/timers", timersRouter);
-app.use("/api/actions", actionsRouter);
-app.use("/api/settings", settingsRouter);
-app.use("/api/exotimer", exotimerSupportRouter);
+app.use("/api/conversations", requireFirebaseAuth, conversationsRouter);
+app.use("/api/timers", requireFirebaseAuth, timersRouter);
+app.use("/api/actions", requireFirebaseAuth, actionsRouter);
+app.use("/api/settings", requireFirebaseAuth, settingsRouter);
+app.use("/api/exotimer", requireExotimerApiKey, exotimerSupportRouter);
 
 app.use((err, _req, res, _next) => {
   console.error("Unhandled error:", err);

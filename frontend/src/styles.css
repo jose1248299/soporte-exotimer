@@ -141,6 +141,12 @@ button {
   background: #0f604f;
 }
 
+.primary-action:disabled,
+.secondary-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .secondary-action {
   padding: 0 16px;
   color: #344256;
@@ -371,6 +377,10 @@ button {
   font-size: 12px;
   font-weight: 800;
   line-height: 1.35;
+}
+
+.login-error {
+  margin: 0;
 }
 
 .search-box input {
@@ -616,6 +626,18 @@ button {
   object-fit: contain;
   border-radius: 8px;
   background: #0f172a;
+}
+
+.message-media-placeholder {
+  display: grid;
+  min-width: 220px;
+  min-height: 120px;
+  place-items: center;
+  border-radius: 8px;
+  color: #64748b;
+  background: #e2e8f0;
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .message-media figcaption {
