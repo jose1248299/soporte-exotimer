@@ -8,6 +8,7 @@ import {
   Headphones,
   Image as ImageIcon,
   LockKeyhole,
+  MessageCircle,
   Search,
   Send,
   Settings,
