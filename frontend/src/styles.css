@@ -187,7 +187,6 @@ button {
 }
 
 .topbar,
-.metrics-row,
 .actions-strip,
 .inbox {
   max-width: 1440px;
@@ -217,43 +216,6 @@ button {
   display: flex;
   align-items: center;
   gap: 10px;
-}
-
-.metrics-row {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.metrics-row div {
-  min-width: 0;
-  height: 68px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 0 16px;
-  border: 1px solid #dce3ec;
-  border-radius: 8px;
-  background: #ffffff;
-}
-
-.metrics-row svg {
-  color: #12725d;
-}
-
-.metrics-row strong {
-  color: #111827;
-  font-size: 22px;
-}
-
-.metrics-row span {
-  min-width: 0;
-  color: #64748b;
-  font-size: 13px;
-  font-weight: 700;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .actions-strip {
@@ -1177,14 +1139,6 @@ button {
     font-size: 20px;
   }
 
-  .metrics-row {
-    grid-template-columns: 1fr;
-  }
-
-  .metrics-row div {
-    height: 50px;
-  }
-
   .inbox {
     grid-template-columns: 1fr;
   }
@@ -1255,10 +1209,6 @@ button {
 
   .login-panel h1 {
     font-size: 25px;
-  }
-
-  .metrics-row {
-    display: none;
   }
 
   .actions-strip {

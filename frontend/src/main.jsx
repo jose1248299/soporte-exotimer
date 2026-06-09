@@ -5,16 +5,13 @@ import {
   Bot,
   CheckCircle2,
   ClipboardCheck,
-  Clock3,
   Headphones,
   Image as ImageIcon,
   LockKeyhole,
-  MessageCircle,
   Search,
   Send,
   Settings,
   ShieldCheck,
-  Sparkles,
   UserCog,
   UserRound,
   Zap,
@@ -774,13 +771,6 @@ function SupportApp({ onBack }) {
     lastMessageKeyRef.current = messageKey;
   }, [messages, selected?.id]);
 
-  const stats = useMemo(() => {
-    const total = conversations.length;
-    const waiting = conversations.filter((item) => item.status === "WAITING_HUMAN").length;
-    const ai = conversations.filter((item) => item.userType !== "UNKNOWN").length;
-    return { total, waiting, ai, pending: pendingActions.length };
-  }, [conversations, pendingActions]);
-
   const filtered = useMemo(() => {
     const term = query.trim().toLowerCase();
     return conversations.filter((item) => {
@@ -888,29 +878,6 @@ function SupportApp({ onBack }) {
           </button>
         </div>
       </header>
-
-      <section className="metrics-row" aria-label="Resumen">
-        <div>
-          <MessageCircle size={18} />
-          <strong>{stats.total}</strong>
-          <span>Conversaciones</span>
-        </div>
-        <div>
-          <Sparkles size={18} />
-          <strong>{stats.ai}</strong>
-          <span>Clasificadas</span>
-        </div>
-        <div>
-          <Clock3 size={18} />
-          <strong>{stats.waiting}</strong>
-          <span>Requieren humano</span>
-        </div>
-        <div>
-          <ClipboardCheck size={18} />
-          <strong>{stats.pending}</strong>
-          <span>Confirmaciones</span>
-        </div>
-      </section>
 
       {pendingActions.length > 0 && (
         <section className="actions-strip" aria-label="Acciones pendientes">
