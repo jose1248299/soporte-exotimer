@@ -49,6 +49,10 @@ function supportsPushNotifications() {
   return "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
 }
 
+function isMobileLayout() {
+  return typeof window !== "undefined" && window.matchMedia("(max-width: 860px)").matches;
+}
+
 const MOCK_CONVERSATIONS = [
   {
     id: "demo-1",
@@ -738,7 +742,8 @@ function SupportApp({ onBack }) {
         if (!normalized.length) setMessages([]);
         setSelected((current) => {
           if (!normalized.length) return null;
-          if (!current || String(current.id).startsWith("demo-")) return normalized[0];
+          if (!current) return isMobileLayout() || listLoaded.current ? null : normalized[0];
+          if (String(current.id).startsWith("demo-")) return normalized[0];
           return normalized.find((item) => item.id === current.id) || normalized[0];
         });
         listLoaded.current = true;
