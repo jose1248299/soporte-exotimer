@@ -5,6 +5,7 @@ const { getPolicy } = require("./supportPolicies");
 const { sendNewMessageNotification } = require("./pushNotifications");
 const { findOrCreateSupportCase, pickCompetitionId } = require("./supportCases");
 const { downloadMedia, sendTextMessage } = require("./waba");
+const { normalizeDorsalReferences } = require("../utils/dorsal");
 const { normalizePhone } = require("../utils/phone");
 
 async function findOrCreateConversation({ phone, displayName }) {
@@ -61,14 +62,14 @@ function mergeClassificationWithConversation(classification, conversation) {
       intent: classification.intent === "unknown" ? previous.intent || classification.intent : classification.intent,
       summary: classification.summary || previous.summary,
       action: classification.action || previous.action || null,
-      actionInput: mergedInput,
+      actionInput: normalizeDorsalReferences(mergedInput),
       needsHuman: classification.needsHuman || previous.needsHuman || false,
     };
   }
 
   return {
     ...classification,
-    actionInput: mergedInput,
+    actionInput: normalizeDorsalReferences(mergedInput),
   };
 }
 
@@ -345,6 +346,10 @@ async function processInboundMessage({ waId, from, text = "", timestamp, rawPayl
     history,
   });
   classification = mergeClassificationWithConversation(classification, conversation);
+  classification = {
+    ...classification,
+    actionInput: normalizeDorsalReferences(classification.actionInput || {}),
+  };
 
   const userType = timer ? "TIMER" : classification.userType;
   const contextResolution = await resolveCompetitionForAction(userType, classification);

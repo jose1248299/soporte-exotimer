@@ -1,5 +1,6 @@
 const axios = require("axios");
 const config = require("../config");
+const { normalizeDorsal, normalizeDorsalReferences } = require("../utils/dorsal");
 
 const SAFE_READ = "safe_read";
 const SAFE_WRITE = "safe_write";
@@ -377,11 +378,12 @@ async function updateEventTicket(input) {
 }
 
 async function getInscription(input) {
+  const normalizedInput = normalizeDorsalReferences(input);
   return apiRequest({
     path: "/api/inscription/detail-verify/",
     params: {
-      competition: pickCompetitionId(input),
-      dorsal: input.dorsal || input.bib,
+      competition: pickCompetitionId(normalizedInput),
+      dorsal: normalizedInput.dorsal || normalizedInput.bib,
     },
   });
 }
@@ -426,7 +428,7 @@ function pickResultId(row) {
 }
 
 function pickLookupDorsal(input = {}) {
-  return input.currentDorsal || input.oldDorsal || input.previousDorsal || input.dorsal || input.bib;
+  return normalizeDorsal(input.currentDorsal || input.oldDorsal || input.previousDorsal || input.dorsal || input.bib);
 }
 
 async function resolveResultForUpdate(input = {}) {
@@ -499,7 +501,7 @@ function applyRequestedValueByMode(input = {}, patch = {}, mode) {
   if (!requested) return patch;
 
   if (mode === "dorsal" || targetIncludes(input, ["dorsal", "bib"])) {
-    patch.dorsal = requested;
+    patch.dorsal = normalizeDorsal(requested);
   }
 
   if (mode === "event_category") {
@@ -547,8 +549,9 @@ function buildResultParticipantForm({ input, resultId, detail, mode }) {
 }
 
 async function updateResultParticipant(input, mode) {
-  const { resultId, detail } = await resolveResultForUpdate(input);
-  const form = buildResultParticipantForm({ input, resultId, detail, mode });
+  const normalizedInput = normalizeDorsalReferences(input);
+  const { resultId, detail } = await resolveResultForUpdate(normalizedInput);
+  const form = buildResultParticipantForm({ input: normalizedInput, resultId, detail, mode });
 
   const required = ["dorsal", "participantName", "participantLastname", "evento_distancia", "genero", "categoria"];
   const missing = required.filter((key) => form[key] === undefined || form[key] === null || form[key] === "");
@@ -600,22 +603,23 @@ async function getRaws(input) {
 }
 
 async function createManualRaw(input) {
-  const competitionId = pickCompetitionId(input);
-  const dorsal = input.dorsal || input.bib;
+  const normalizedInput = normalizeDorsalReferences(input);
+  const competitionId = pickCompetitionId(normalizedInput);
+  const dorsal = normalizedInput.dorsal || normalizedInput.bib;
   if (!dorsal) throw new Error("Falta dorsal.");
-  if (!input.hour) throw new Error("Falta hour en formato DD/MM/YYYY HH:mm:ss.");
+  if (!normalizedInput.hour) throw new Error("Falta hour en formato DD/MM/YYYY HH:mm:ss.");
 
   return apiRequest({
     method: "POST",
     path: "/v2/raws/create/",
     data: {
       dorsal: String(dorsal),
-      chip: String(input.chip || dorsal),
-      hour: input.hour,
-      zulu: input.zulu || input.hour,
-      location: input.location || "META",
-      team_computer: input.team_computer || `reader_${input.location || "META"}_${competitionId}`,
-      state: input.state ?? false,
+      chip: String(normalizedInput.chip || dorsal),
+      hour: normalizedInput.hour,
+      zulu: normalizedInput.zulu || normalizedInput.hour,
+      location: normalizedInput.location || "META",
+      team_computer: normalizedInput.team_computer || `reader_${normalizedInput.location || "META"}_${competitionId}`,
+      state: normalizedInput.state ?? false,
       competition: Number(competitionId),
     },
   });
@@ -663,17 +667,18 @@ async function getConnectedReaders() {
 }
 
 function createResultCorrectionCase(input) {
+  const normalizedInput = normalizeDorsalReferences(input);
   return {
     created: true,
     type: "RESULT_CORRECTION_CASE",
     requiredReview: true,
     details: {
-      competitionId: input.competitionId || input.competition_id || null,
-      competitionName: input.competitionName || null,
-      dorsal: input.dorsal || input.bib || null,
-      athleteName: input.athleteName || input.name || null,
-      requestedCorrection: input.requestedCorrection || input.message || null,
-      evidence: input.evidence || null,
+      competitionId: normalizedInput.competitionId || normalizedInput.competition_id || null,
+      competitionName: normalizedInput.competitionName || null,
+      dorsal: normalizedInput.dorsal || normalizedInput.bib || null,
+      athleteName: normalizedInput.athleteName || normalizedInput.name || null,
+      requestedCorrection: normalizedInput.requestedCorrection || normalizedInput.message || null,
+      evidence: normalizedInput.evidence || null,
     },
   };
 }
@@ -723,7 +728,7 @@ async function executeAction(userType, actionName, input = {}, options = {}) {
   }
   const handler = HANDLERS[actionName];
   if (!handler) throw new Error(`No hay handler para ${actionName}`);
-  return handler(input);
+  return handler(normalizeDorsalReferences(input));
 }
 
 module.exports = {

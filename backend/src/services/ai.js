@@ -128,6 +128,7 @@ async function classifyMessage({ text, forcedTimer, previousClassification, prev
     "- Si el mensaje actual completa datos pedidos antes, conserva el userType, intent, action y actionInput anterior, agregando solo los datos nuevos.",
     "- No cambies a UNKNOWN si el historial muestra claramente que la conversacion sigue siendo sobre el mismo caso.",
     "- Extrae y conserva campos utiles: competitionName, competitionId, dorsal, bib, currentDorsal, athleteName, participantName, participantLastname, requestedCorrection, targetField, currentValue, requestedValue, newDorsal, newDistance, newGender, newCategory, eventName, ticketName, phone.",
+    "- Los dorsales no tienen ceros a la izquierda. Si recibes 002, 02 o 0002, interpreta y devuelve dorsal=2. Aplica esto tambien a bib, currentDorsal, newDorsal, detectedDorsals y detectedAthletes[].dorsal.",
     "- Si el usuario menciona varios dorsales o varias personas del equipo, NO dividas el caso. Devuelve detectedDorsals como array de strings y detectedAthletes como array de objetos {name,dorsal} cuando puedas.",
     "- Conserva detectedDorsals y detectedAthletes previos del contexto, agregando nuevos sin perder los anteriores.",
     "- Usa action=null si faltan ids o datos esenciales.",

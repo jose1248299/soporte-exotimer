@@ -1,4 +1,5 @@
 const prisma = require("../lib/prisma");
+const { normalizeDorsal, normalizeDorsalList, normalizeDorsalReferences } = require("../utils/dorsal");
 
 const OPEN_CASE_STATUSES = ["OPEN", "WAITING_CLARIFICATION", "WAITING_HUMAN"];
 
@@ -10,7 +11,7 @@ function pickCompetitionId(input = {}) {
 
 function pickDorsal(input = {}) {
   const value = input.dorsal || input.bib;
-  return value == null || value === "" ? null : String(value);
+  return value == null || value === "" ? null : String(normalizeDorsal(value));
 }
 
 function pickAthleteName(input = {}) {
@@ -25,7 +26,14 @@ function asArray(value) {
 }
 
 function uniqueStrings(values) {
-  return [...new Set(values.map((value) => String(value).trim()).filter(Boolean))];
+  return [
+    ...new Set(
+      values
+        .filter((value) => value !== undefined && value !== null && value !== "" && value !== "undefined")
+        .map((value) => String(value).trim())
+        .filter(Boolean)
+    ),
+  ];
 }
 
 function normalizeAthlete(value) {
@@ -34,7 +42,7 @@ function normalizeAthlete(value) {
   if (typeof value !== "object") return null;
 
   const name = value.name || value.athleteName || value.participant || null;
-  const dorsal = value.dorsal || value.bib || null;
+  const dorsal = normalizeDorsal(value.dorsal || value.bib || null);
   if (!name && !dorsal) return null;
   return {
     name: name ? String(name) : null,
@@ -53,9 +61,9 @@ function mergeDorsals(existing = [], input = {}) {
 
   return uniqueStrings([
     ...asArray(existing),
-    ...asArray(input.detectedDorsals),
-    ...asArray(input.dorsals),
-    ...asArray(input.bibs),
+    ...normalizeDorsalList(input.detectedDorsals),
+    ...normalizeDorsalList(input.dorsals),
+    ...normalizeDorsalList(input.bibs),
     input.dorsal,
     input.bib,
     ...athletes.map((athlete) => athlete.dorsal),
@@ -100,7 +108,10 @@ function statusFromClassification(classification = {}) {
 }
 
 async function findOrCreateSupportCase({ conversationId, userType, classification, timestamp }) {
-  const input = classification?.actionInput || {};
+  const input = normalizeDorsalReferences(classification?.actionInput || {});
+  const normalizedClassification = classification
+    ? { ...classification, actionInput: input }
+    : classification;
   const competitionId = pickCompetitionId(input);
   if (!competitionId) return null;
 
@@ -119,14 +130,14 @@ async function findOrCreateSupportCase({ conversationId, userType, classificatio
 
   const data = {
     userType,
-    status: statusFromClassification(classification),
+    status: statusFromClassification(normalizedClassification),
     athleteName: athleteName || existing?.athleteName || null,
     dorsal: dorsal || existing?.dorsal || null,
     detectedDorsals: mergeDorsals(existing?.detectedDorsals, input),
     detectedAthletes: mergeAthletes(existing?.detectedAthletes, input),
-    subject: buildSubject(classification),
-    summary: classification?.summary || existing?.summary || null,
-    classification,
+    subject: buildSubject(normalizedClassification),
+    summary: normalizedClassification?.summary || existing?.summary || null,
+    classification: normalizedClassification,
     lastMessageAt: timestamp || new Date(),
   };
 
