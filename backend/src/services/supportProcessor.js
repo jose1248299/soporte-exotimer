@@ -87,6 +87,7 @@ function actionNeedsCompetitionId(actionName) {
     "EXOTIMER_CREATE_MANUAL_RAW",
     "EXOTIMER_UPDATE_START_TIME",
     "EXOTIMER_UPDATE_EVENT_TICKET",
+    "EXOTIMER_APPLY_RESULT_TIME_EVIDENCE_CORRECTION",
   ].includes(actionName);
 }
 
@@ -205,6 +206,30 @@ function missingFieldsForAction(actionName, input = {}) {
       );
       if (!hasParticipantPatch) missing.push("participantData");
     }
+  }
+
+  if (actionName === "EXOTIMER_APPLY_RESULT_TIME_EVIDENCE_CORRECTION") {
+    const hasResultReference = Boolean(
+      input.resultId ||
+        input.result_id ||
+        input.id ||
+        input.dorsal ||
+        input.bib ||
+        input.currentDorsal ||
+        input.oldDorsal ||
+        input.previousDorsal
+    );
+    const hasEvidenceFinishTime = Boolean(
+      input.evidenceFinishDateTime ||
+        input.evidenceMetaDateTime ||
+        input.evidenceFinishTime ||
+        input.evidenceMetaTime ||
+        input.horaMeta ||
+        input.metaTime ||
+        input.finishTime
+    );
+    if (!hasResultReference) missing.push("dorsal_or_resultId");
+    if (!hasEvidenceFinishTime) missing.push("evidenceFinishTime");
   }
 
   return missing;

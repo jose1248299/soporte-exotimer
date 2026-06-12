@@ -193,12 +193,13 @@ button {
 }
 
 .app-shell {
-  height: 100vh;
-  min-height: 640px;
+  height: 100dvh;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 14px;
   padding: 18px;
+  overflow: hidden;
   background: #eef2f6;
 }
 
@@ -210,7 +211,12 @@ button {
   margin: 0 auto;
 }
 
+.actions-strip {
+  flex: 0 0 auto;
+}
+
 .topbar {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -556,6 +562,7 @@ button {
   min-height: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
   background: #f4f7fa;
 }
 

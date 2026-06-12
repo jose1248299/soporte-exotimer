@@ -92,6 +92,12 @@ const ACTIONS = {
     risk: NEEDS_CONFIRMATION,
     description: "Edita el tiempo de un resultado en un punto de control.",
   },
+  EXOTIMER_APPLY_RESULT_TIME_EVIDENCE_CORRECTION: {
+    roles: ["ATHLETE", "TIMER"],
+    risk: SAFE_WRITE,
+    description:
+      "Crea una lectura raw manual de META desde evidencia contundente y la asigna al resultado del atleta.",
+  },
   EXOTIMER_GET_CONNECTED_READERS: {
     roles: ["TIMER"],
     risk: SAFE_READ,
@@ -468,6 +474,171 @@ function clean(value) {
   return String(value).trim();
 }
 
+function pad2(value) {
+  return String(value).padStart(2, "0");
+}
+
+function parseHms(value) {
+  const match = String(value || "").match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  const seconds = Number(match[3] || 0);
+  if (hours > 23 || minutes > 59 || seconds > 59) return null;
+  return { hours, minutes, seconds };
+}
+
+function parseDurationSeconds(value) {
+  const match = String(value || "").trim().match(/^(\d{1,3}):(\d{2})(?::(\d{2}))?$/);
+  if (!match) return null;
+  if (match[3] === undefined) return Number(match[1]) * 60 + Number(match[2]);
+  return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
+}
+
+function formatDuration(seconds) {
+  const safeSeconds = Math.max(0, Math.round(seconds));
+  const hours = Math.floor(safeSeconds / 3600);
+  const minutes = Math.floor((safeSeconds % 3600) / 60);
+  const remainingSeconds = safeSeconds % 60;
+  return `${pad2(hours)}:${pad2(minutes)}:${pad2(remainingSeconds)}`;
+}
+
+function parseDateParts(value) {
+  const raw = String(value || "").trim();
+  let match = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (match) return { year: Number(match[1]), month: Number(match[2]), day: Number(match[3]) };
+
+  match = raw.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (match) return { day: Number(match[1]), month: Number(match[2]), year: Number(match[3]) };
+
+  return null;
+}
+
+function parseLocalDateTime(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+
+  const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})[T\s](\d{1,2}):(\d{2})(?::(\d{2}))?(?:([+-]\d{2}:\d{2})|Z)?/);
+  if (iso) {
+    return {
+      date: { year: Number(iso[1]), month: Number(iso[2]), day: Number(iso[3]) },
+      time: { hours: Number(iso[4]), minutes: Number(iso[5]), seconds: Number(iso[6] || 0) },
+      offset: iso[7] || "-05:00",
+    };
+  }
+
+  const local = raw.match(/(\d{1,2})\/(\d{1,2})\/(\d{4}),?\s+(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (local) {
+    return {
+      date: { day: Number(local[1]), month: Number(local[2]), year: Number(local[3]) },
+      time: { hours: Number(local[4]), minutes: Number(local[5]), seconds: Number(local[6] || 0) },
+      offset: "-05:00",
+    };
+  }
+
+  return null;
+}
+
+function formatRawDateTime(parts) {
+  return `${pad2(parts.date.day)}/${pad2(parts.date.month)}/${parts.date.year} ${pad2(parts.time.hours)}:${pad2(parts.time.minutes)}:${pad2(parts.time.seconds)}`;
+}
+
+function formatIsoLocal(parts) {
+  return `${parts.date.year}-${pad2(parts.date.month)}-${pad2(parts.date.day)}T${pad2(parts.time.hours)}:${pad2(parts.time.minutes)}:${pad2(parts.time.seconds)}${parts.offset || "-05:00"}`;
+}
+
+function datePartsToUtcMs(parts) {
+  const offset = parts.offset || "-05:00";
+  return Date.parse(formatIsoLocal({ ...parts, offset }));
+}
+
+function pickEventStartDateTime(detail = {}, input = {}) {
+  const salidaName = normalizeText(input.salida || input.outputName || input.startName || detail?.salida || detail?.outputName);
+  const salidas = Array.isArray(detail?.event?.configs?.[0]?.salidas) ? detail.event.configs[0].salidas : [];
+  const selectedSalida = salidas.find((salida) => {
+    const name = normalizeText(salida?.data?.nombre || salida?.name || salida?.nombre);
+    return salidaName && name === salidaName;
+  }) || salidas[0];
+
+  const salidaDate = selectedSalida?.data?.fecha || selectedSalida?.fecha;
+  const parsedSalida = parseLocalDateTime(salidaDate);
+  if (parsedSalida) return parsedSalida;
+
+  const salidaRaw = asArray(detail?.raws_asigments).find((raw) => normalizeText(raw?.location) === "salida");
+  const parsedRawSalida = parseLocalDateTime(salidaRaw?.hour || salidaRaw?.zulu);
+  if (parsedRawSalida) return parsedRawSalida;
+
+  return parseLocalDateTime(input.startDateTime || input.salidaDateTime);
+}
+
+function pickCompetitionDate(input = {}, detail = {}) {
+  const explicit = parseDateParts(input.eventDate || input.date || input.competitionDate || input.evidenceDate || input.evidenceFinishDate);
+  if (explicit) return explicit;
+
+  const eventStart = pickEventStartDateTime(detail, input);
+  if (eventStart?.date) return eventStart.date;
+
+  const metaDate = parseLocalDateTime(detail?.hora_meta || detail?.metaHour);
+  if (metaDate?.date) return metaDate.date;
+
+  return null;
+}
+
+function buildEvidenceFinishDateTime(input = {}, detail = {}) {
+  const explicit = parseLocalDateTime(
+    input.evidenceFinishDateTime ||
+      input.evidenceMetaDateTime ||
+      input.horaMetaDateTime ||
+      input.finishDateTime ||
+      input.metaDateTime
+  );
+  if (explicit) return explicit;
+
+  const time = parseHms(
+    input.evidenceFinishTime ||
+      input.evidenceMetaTime ||
+      input.horaMeta ||
+      input.metaTime ||
+      input.finishTime ||
+      input.rawTime
+  );
+  const date = pickCompetitionDate(input, detail);
+  if (!date || !time) return null;
+  return { date, time, offset: input.timezoneOffset || "-05:00" };
+}
+
+function findRawByIdCandidate(value) {
+  if (!value) return null;
+  if (value.id) return value.id;
+  if (value.raw_id) return value.raw_id;
+  if (value.rawId) return value.rawId;
+  if (value.raw) return findRawByIdCandidate(value.raw);
+  if (value.data) return findRawByIdCandidate(value.data);
+  if (value.result) return findRawByIdCandidate(value.result);
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findRawByIdCandidate(item);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+async function findCreatedRawId({ resultId, rawHour, dorsal, competitionId }) {
+  const detail = firstDetail(await getResultDetail({ resultId }));
+  const rows = [...asArray(detail?.raws), ...asArray(detail?.raws_asigments)];
+  const match = rows.find((raw) => {
+    const rawDorsal = normalizeDorsal(raw?.dorsal || raw?.bib || raw?.chip);
+    const sameDorsal = rawDorsal && String(rawDorsal) === String(dorsal);
+    const sameLocation = normalizeText(raw?.location) === "meta";
+    const sameCompetition = !raw?.competition || String(raw.competition) === String(competitionId);
+    const parsedRaw = parseLocalDateTime(raw?.hour || raw?.zulu);
+    const sameHour = parsedRaw && formatRawDateTime(parsedRaw) === rawHour;
+    return sameDorsal && sameLocation && sameCompetition && sameHour;
+  });
+  return match?.id || match?.raw_id || match?.rawId || null;
+}
+
 function requestedValue(input = {}) {
   return clean(
     input.requestedValue ??
@@ -662,6 +833,155 @@ async function editResultTime(input) {
   });
 }
 
+function hasStrongTimeEvidence(input = {}) {
+  if (input.hasStrongEvidence === true || input.evidenceStrength === "strong" || input.evidenceStrength === "contundente") {
+    return true;
+  }
+
+  const confidence = Number(input.evidenceConfidence ?? input.confidence);
+  if (Number.isFinite(confidence) && confidence >= 0.85) return true;
+
+  const summary = normalizeText([input.evidenceSummary, input.evidence, input.message].filter(Boolean).join(" "));
+  const hasObjectiveEvidence = /(imagen|foto|captura|garmin|strava|gps|meta|llegada|evidencia)/.test(summary);
+  const hasTime = Boolean(
+    input.evidenceFinishDateTime ||
+      input.evidenceMetaDateTime ||
+      input.evidenceFinishTime ||
+      input.evidenceMetaTime ||
+      input.horaMeta ||
+      input.metaTime ||
+      input.finishTime
+  );
+  return hasObjectiveEvidence && hasTime;
+}
+
+function pickOfficialSeconds(input = {}, detail = {}) {
+  return (
+    parseDurationSeconds(input.currentValue) ??
+    parseDurationSeconds(input.currentOfficialTime) ??
+    parseDurationSeconds(input.officialTime) ??
+    parseDurationSeconds(detail?.tiempo_oficial) ??
+    parseDurationSeconds(detail?.officialTime) ??
+    parseDurationSeconds(detail?.document?.time_TOTAL)
+  );
+}
+
+function pickRequestedSeconds(input = {}) {
+  return (
+    parseDurationSeconds(input.requestedValue) ??
+    parseDurationSeconds(input.correctValue) ??
+    parseDurationSeconds(input.newValue) ??
+    parseDurationSeconds(input.evidenceElapsedTime) ??
+    parseDurationSeconds(input.gpsElapsedTime)
+  );
+}
+
+function buildTimeCorrectionCurrent({ input, detail, finishParts }) {
+  const eventStart = pickEventStartDateTime(detail, input);
+  if (eventStart) {
+    const diffSeconds = Math.max(0, Math.round((datePartsToUtcMs(finishParts) - datePartsToUtcMs(eventStart)) / 1000));
+    if (Number.isFinite(diffSeconds)) return formatDuration(diffSeconds);
+  }
+
+  const requestedSeconds = pickRequestedSeconds(input);
+  if (requestedSeconds != null) return formatDuration(requestedSeconds);
+
+  return input.timeCurrent || input.requestedValue || input.correctValue;
+}
+
+async function applyResultTimeEvidenceCorrection(input = {}) {
+  const normalizedInput = normalizeDorsalReferences(input);
+  const competitionId = pickCompetitionId(normalizedInput);
+  const { resultId, detail } = await resolveResultForUpdate(normalizedInput);
+  const dorsal = normalizeDorsal(
+    normalizedInput.dorsal ||
+      normalizedInput.bib ||
+      normalizedInput.currentDorsal ||
+      detail?.dorsal ||
+      detail?.bib ||
+      detail?.participant?.dorsal
+  );
+  if (!dorsal) throw new Error("Falta dorsal para crear el raw de evidencia.");
+
+  const finishParts = buildEvidenceFinishDateTime(normalizedInput, detail);
+  if (!finishParts) {
+    throw new Error("Falta hora meta de evidencia en formato HH:mm:ss o fecha/hora completa.");
+  }
+
+  if (!hasStrongTimeEvidence(normalizedInput)) {
+    throw new Error("La evidencia no esta marcada como contundente para corregir el tiempo automaticamente.");
+  }
+
+  const timeCurrent = buildTimeCorrectionCurrent({ input: normalizedInput, detail, finishParts });
+  if (!timeCurrent) throw new Error("No se pudo calcular el tiempo para asignar la hora meta.");
+
+  const officialSeconds = pickOfficialSeconds(normalizedInput, detail);
+  const proposedSeconds = pickRequestedSeconds(normalizedInput) ?? parseDurationSeconds(timeCurrent);
+  const minDifferenceSeconds = Number(normalizedInput.minDifferenceSeconds || 120);
+  if (officialSeconds == null || proposedSeconds == null) {
+    throw new Error("Falta el tiempo oficial o el tiempo propuesto para validar la diferencia.");
+  }
+  const differenceSeconds = Math.abs(officialSeconds - proposedSeconds);
+  if (differenceSeconds < minDifferenceSeconds) {
+    throw new Error(`La diferencia con el tiempo oficial es menor a ${minDifferenceSeconds} segundos.`);
+  }
+
+  const rawHour = formatRawDateTime(finishParts);
+  const rawPayload = {
+    competitionId,
+    dorsal,
+    chip: normalizeDorsal(normalizedInput.chip || detail?.chip || dorsal),
+    hour: rawHour,
+    zulu: rawHour,
+    location: "META",
+    team_computer: normalizedInput.team_computer || `reader_META_${competitionId}`,
+    state: false,
+  };
+  const rawResponse = await createManualRaw(rawPayload);
+  let rawId = findRawByIdCandidate(rawResponse);
+  if (!rawId) {
+    rawId = await findCreatedRawId({ resultId, rawHour, dorsal, competitionId });
+  }
+  if (!rawId) {
+    throw new Error("Se creo el raw, pero no se pudo identificar su id para asignarlo al resultado.");
+  }
+
+  const editPayload = {
+    timeDateCurrent: formatIsoLocal(finishParts),
+    timeCurrent,
+    selectRaw: rawId,
+    result_id: resultId,
+    name_colum: normalizedInput.name_colum || normalizedInput.nameColumn || "loc_Meta",
+  };
+  const editResponse = await editResultTime(editPayload);
+
+  return {
+    created: true,
+    type: "RESULT_TIME_EVIDENCE_CORRECTION",
+    changed: {
+      competitionId,
+      resultId,
+      dorsal,
+      beforeOfficial: detail?.tiempo_oficial || detail?.officialTime || null,
+      evidenceFinishDateTime: formatIsoLocal(finishParts),
+      evidenceRawHour: rawHour,
+      createdRawId: rawId,
+      assignedColumn: editPayload.name_colum,
+      computedTimeCurrent: timeCurrent,
+    },
+    raw: {
+      endpoint: "/v2/raws/create/",
+      payload: rawPayload,
+      response: rawResponse,
+    },
+    edit: {
+      endpoint: "/v2/results/edit-times/",
+      payload: editPayload,
+      response: editResponse,
+    },
+  };
+}
+
 async function getConnectedReaders() {
   return apiRequest({ path: "/v2/computers/list/active-channels/" });
 }
@@ -716,6 +1036,7 @@ const HANDLERS = {
   EXOTIMER_CREATE_MANUAL_RAW: createManualRaw,
   EXOTIMER_UPDATE_START_TIME: updateStartTime,
   EXOTIMER_EDIT_RESULT_TIME: editResultTime,
+  EXOTIMER_APPLY_RESULT_TIME_EVIDENCE_CORRECTION: applyResultTimeEvidenceCorrection,
   EXOTIMER_GET_CONNECTED_READERS: getConnectedReaders,
   BUYER_CREATE_PRICE_INQUIRY: createBuyerInquiry,
 };
