@@ -213,6 +213,9 @@ button {
 
 .actions-strip {
   flex: 0 0 auto;
+  min-height: 0;
+  max-height: min(176px, 24dvh);
+  overflow-y: auto;
 }
 
 .topbar {
@@ -327,8 +330,9 @@ button {
 }
 
 .inbox {
+  height: 100%;
   min-height: 0;
-  flex: 1;
+  flex: 1 1 auto;
   display: grid;
   grid-template-columns: minmax(300px, 390px) minmax(0, 1fr);
   border: 1px solid #d7dee8;
@@ -340,6 +344,7 @@ button {
 
 .conversation-pane {
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   border-right: 1px solid #d7dee8;
@@ -560,6 +565,7 @@ button {
 .chat-pane {
   min-width: 0;
   min-height: 0;
+  height: 100%;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   overflow: hidden;
