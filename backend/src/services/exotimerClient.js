@@ -206,6 +206,18 @@ function makeLocalId() {
   return Date.now() + Math.floor(Math.random() * 1000);
 }
 
+function buildAudit({ method = "GET", path, payload, params, response }) {
+  return {
+    request: {
+      method,
+      endpoint: path,
+      ...(params ? { params } : {}),
+      ...(payload !== undefined ? { payload } : {}),
+    },
+    response,
+  };
+}
+
 async function apiRequest({ method = "GET", path, data, params, headers, retryOnAuth = true }) {
   assertClientConfig();
   const token = await getAccessToken();
@@ -365,13 +377,15 @@ async function updateEventTicket(input) {
     };
   });
 
-  const saved = await apiRequest({
+  const request = {
     method: "POST",
     path: "/api/competition/event/create/",
     data: { competition: competitionId, form },
-  });
+  };
+  const saved = await apiRequest(request);
 
   return {
+    ...buildAudit({ method: request.method, path: request.path, payload: request.data, response: saved }),
     saved,
     changed: {
       competitionId,
@@ -385,13 +399,18 @@ async function updateEventTicket(input) {
 
 async function getInscription(input) {
   const normalizedInput = normalizeDorsalReferences(input);
-  return apiRequest({
+  const request = {
     path: "/api/inscription/detail-verify/",
     params: {
       competition: pickCompetitionId(normalizedInput),
       dorsal: normalizedInput.dorsal || normalizedInput.bib,
     },
-  });
+  };
+  const response = await apiRequest(request);
+  return {
+    ...buildAudit({ path: request.path, params: request.params, response }),
+    data: response,
+  };
 }
 
 async function getResults(input) {
@@ -645,6 +664,7 @@ function findRawByIdCandidate(value) {
   if (value.raw) return findRawByIdCandidate(value.raw);
   if (value.data) return findRawByIdCandidate(value.data);
   if (value.result) return findRawByIdCandidate(value.result);
+  if (value.response) return findRawByIdCandidate(value.response);
   if (Array.isArray(value)) {
     for (const item of value) {
       const found = findRawByIdCandidate(item);
@@ -763,13 +783,15 @@ async function updateResultParticipant(input, mode) {
   const missing = required.filter((key) => isBlank(form[key]));
   if (missing.length) throw new Error(`Faltan datos del resultado para actualizar: ${missing.join(", ")}`);
 
-  const saved = await apiRequest({
+  const request = {
     method: "POST",
     path: "/v2/results/update-participant/",
     data: form,
-  });
+  };
+  const saved = await apiRequest(request);
 
   return {
+    ...buildAudit({ method: request.method, path: request.path, payload: request.data, response: saved }),
     saved,
     changed: {
       competitionId: pickCompetitionId(input),
@@ -801,11 +823,21 @@ async function updateResultEventCategory(input) {
 }
 
 async function validatePreRace(input) {
-  return apiRequest({ path: `/v2/results/validate/${pickCompetitionId(input)}/` });
+  const request = { path: `/v2/results/validate/${pickCompetitionId(input)}/` };
+  const response = await apiRequest(request);
+  return {
+    ...buildAudit({ path: request.path, response }),
+    data: response,
+  };
 }
 
 async function getRaws(input) {
-  return apiRequest({ path: `/v2/raws/${pickCompetitionId(input)}/list/` });
+  const request = { path: `/v2/raws/${pickCompetitionId(input)}/list/` };
+  const response = await apiRequest(request);
+  return {
+    ...buildAudit({ path: request.path, response }),
+    data: response,
+  };
 }
 
 async function createManualRaw(input) {
@@ -815,7 +847,7 @@ async function createManualRaw(input) {
   if (!dorsal) throw new Error("Falta dorsal.");
   if (!normalizedInput.hour) throw new Error("Falta hour en formato DD/MM/YYYY HH:mm:ss.");
 
-  return apiRequest({
+  const request = {
     method: "POST",
     path: "/v2/raws/create/",
     data: {
@@ -828,7 +860,12 @@ async function createManualRaw(input) {
       state: normalizedInput.state ?? false,
       competition: Number(competitionId),
     },
-  });
+  };
+  const response = await apiRequest(request);
+  return {
+    ...buildAudit({ method: request.method, path: request.path, payload: request.data, response }),
+    ...response,
+  };
 }
 
 async function updateStartTime(input) {
@@ -838,7 +875,7 @@ async function updateStartTime(input) {
     throw new Error("La hora debe tener formato HH:mm:ss.");
   }
 
-  return apiRequest({
+  const request = {
     method: "POST",
     path: "/v2/raws/config/update/",
     data: {
@@ -847,7 +884,12 @@ async function updateStartTime(input) {
       event_name: input.event_name || input.eventName || input.distance,
       competition_id: competitionId,
     },
-  });
+  };
+  const response = await apiRequest(request);
+  return {
+    ...buildAudit({ method: request.method, path: request.path, payload: request.data, response }),
+    data: response,
+  };
 }
 
 async function editResultTime(input) {
@@ -855,7 +897,7 @@ async function editResultTime(input) {
   const missing = required.filter((key) => !input[key]);
   if (missing.length) throw new Error(`Faltan campos: ${missing.join(", ")}`);
 
-  return apiRequest({
+  const request = {
     method: "POST",
     path: "/v2/results/edit-times/",
     data: {
@@ -865,7 +907,12 @@ async function editResultTime(input) {
       result_id: input.result_id,
       name_colum: input.name_colum,
     },
-  });
+  };
+  const response = await apiRequest(request);
+  return {
+    ...buildAudit({ method: request.method, path: request.path, payload: request.data, response }),
+    ...response,
+  };
 }
 
 function hasStrongTimeEvidence(input = {}) {
