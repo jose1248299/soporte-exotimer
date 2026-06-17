@@ -474,6 +474,36 @@ function clean(value) {
   return String(value).trim();
 }
 
+function isBlank(value) {
+  return value === undefined || value === null || String(value).trim() === "";
+}
+
+function cleanList(value) {
+  if (Array.isArray(value)) return value.map(clean).filter(Boolean);
+  const text = clean(value);
+  if (!text) return [];
+  if (text.includes(",")) return text.split(",").map(clean).filter(Boolean);
+  if (text.includes(" / ")) return text.split(/\s+\/\s+/).map(clean).filter(Boolean);
+  if (/\s+y\s+/i.test(text)) return text.split(/\s+y\s+/i).map(clean).filter(Boolean);
+  return [text];
+}
+
+function deriveLastnameFromFullName(value) {
+  const text = clean(value);
+  if (!text || text.includes("@")) return undefined;
+  const tokens = text.split(/\s+/).filter(Boolean);
+  if (tokens.length < 2) return undefined;
+  if (tokens.length === 2) return tokens[1];
+  return tokens.slice(-2).join(" ");
+}
+
+function deriveLastnameValue(value) {
+  const names = cleanList(value);
+  if (!names.length) return undefined;
+  const derived = names.map(deriveLastnameFromFullName).filter(Boolean);
+  return derived.length === names.length ? derived.join(",") : undefined;
+}
+
 function pad2(value) {
   return String(value).padStart(2, "0");
 }
@@ -697,9 +727,14 @@ function buildResultParticipantForm({ input, resultId, detail, mode }) {
 
   const nextDorsal = input.newDorsal ?? input.dorsalNew ?? input.correctDorsal ?? patch.dorsal;
   const participantName = clean(input.participantName ?? input.athleteName ?? input.nameNew ?? input.firstName ?? patch.participantName);
-  const participantLastname = clean(
+  const explicitParticipantLastname = clean(
     input.participantLastname ?? input.lastnameNew ?? input.lastName ?? input.lastname ?? input.surname ?? patch.participantLastname
   );
+  const existingParticipantLastname = clean(participant.lastname ?? detail?.participantLastname ?? detail?.lastname);
+  const participantLastname =
+    explicitParticipantLastname ??
+    existingParticipantLastname ??
+    deriveLastnameValue(participantName ?? patch.participantName ?? requestedValue(input) ?? participant.name ?? detail?.participantName);
   const eventName = clean(input.newDistance ?? input.distanceNew ?? input.evento_distancia ?? input.distance ?? input.eventName ?? patch.evento_distancia);
   const gender = clean(input.newGender ?? input.genderNew ?? input.genero ?? input.gender ?? input.genre ?? patch.genero);
   const categoryName = clean(input.newCategory ?? input.categoryNew ?? input.categoria ?? input.category ?? input.categoryName ?? patch.categoria);
@@ -711,7 +746,7 @@ function buildResultParticipantForm({ input, resultId, detail, mode }) {
     dorsal: numberOrString(nextDorsal ?? detail?.dorsal ?? detail?.bib),
     chip: numberOrString(input.chip ?? detail?.chip ?? nextDorsal ?? detail?.dorsal ?? detail?.bib),
     participantName: participantName ?? participant.name ?? detail?.participantName ?? detail?.athleteName,
-    participantLastname: participantLastname ?? participant.lastname ?? detail?.participantLastname ?? detail?.lastname,
+    participantLastname,
     evento_distancia: eventName ?? event.name ?? detail?.evento_distancia ?? detail?.distance,
     genero: gender ?? category.genre ?? detail?.genero ?? detail?.gender,
     categoria: categoryName ?? category.name ?? detail?.categoria ?? detail?.category,
@@ -725,7 +760,7 @@ async function updateResultParticipant(input, mode) {
   const form = buildResultParticipantForm({ input: normalizedInput, resultId, detail, mode });
 
   const required = ["dorsal", "participantName", "participantLastname", "evento_distancia", "genero", "categoria"];
-  const missing = required.filter((key) => form[key] === undefined || form[key] === null || form[key] === "");
+  const missing = required.filter((key) => isBlank(form[key]));
   if (missing.length) throw new Error(`Faltan datos del resultado para actualizar: ${missing.join(", ")}`);
 
   const saved = await apiRequest({
