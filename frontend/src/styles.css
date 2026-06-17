@@ -597,6 +597,29 @@ button {
   background: #e5f5ef;
 }
 
+.action-audit-trigger {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 0;
+  border-radius: 999px;
+  padding: 0 11px;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.action-audit-trigger strong {
+  min-width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  color: #ffffff;
+  background: #12725d;
+  font-size: 11px;
+}
+
 .icon-button {
   width: 38px;
   height: 38px;
@@ -866,6 +889,163 @@ button {
   border-radius: 8px;
   background: #ffffff;
   box-shadow: 0 24px 80px rgba(15, 23, 42, 0.28);
+}
+
+.actions-modal {
+  width: min(980px, 100%);
+}
+
+.actions-modal-body {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px;
+  background: #f7f9fb;
+}
+
+.action-accordion-list {
+  display: grid;
+  gap: 10px;
+}
+
+.action-accordion {
+  overflow: hidden;
+  border: 1px solid #d7dee8;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.action-accordion-summary {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  border: 0;
+  padding: 12px;
+  text-align: left;
+  color: #172033;
+  background: #ffffff;
+}
+
+.action-accordion-summary span:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.action-accordion-summary strong,
+.action-accordion-summary small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.action-accordion-summary strong {
+  font-size: 13px;
+}
+
+.action-accordion-summary small {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.action-status {
+  border-radius: 999px;
+  padding: 5px 9px;
+  color: #526071;
+  background: #eef2f6;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.action-status.executed {
+  color: #0f604f;
+  background: #dff7ed;
+}
+
+.action-status.failed {
+  color: #9f1239;
+  background: #ffe4e6;
+}
+
+.action-status.proposed {
+  color: #7a4b12;
+  background: #fff3d8;
+}
+
+.action-status.skipped {
+  color: #475569;
+  background: #e2e8f0;
+}
+
+.action-accordion-detail {
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid #e1e7ef;
+  padding: 12px;
+  background: #fbfcfe;
+}
+
+.action-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.action-detail-grid span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  border: 1px solid #e1e7ef;
+  border-radius: 8px;
+  padding: 8px;
+  color: #526071;
+  background: #ffffff;
+  font-size: 12px;
+}
+
+.action-detail-grid strong {
+  color: #172033;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.action-error {
+  border: 1px solid #fecdd3;
+  border-radius: 8px;
+  padding: 9px 10px;
+  color: #9f1239;
+  background: #fff1f2;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.action-accordion-detail details {
+  border: 1px solid #e1e7ef;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.action-accordion-detail summary {
+  cursor: pointer;
+  padding: 9px 10px;
+  color: #172033;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.action-accordion-detail pre {
+  max-height: 260px;
+  overflow: auto;
+  margin: 0;
+  border-top: 1px solid #e1e7ef;
+  padding: 10px;
+  color: #0f172a;
+  background: #f8fafc;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
 }
 
 .config-header {
@@ -1387,6 +1567,10 @@ button {
     height: calc(100dvh - 20px);
   }
 
+  .action-detail-grid {
+    grid-template-columns: 1fr;
+  }
+
   .config-header {
     padding: 14px;
   }
@@ -1572,6 +1756,14 @@ button {
     height: 100dvh;
     border: 0;
     border-radius: 0;
+  }
+
+  .action-audit-trigger {
+    padding: 0 9px;
+  }
+
+  .action-audit-trigger strong {
+    display: none;
   }
 
   .config-header {

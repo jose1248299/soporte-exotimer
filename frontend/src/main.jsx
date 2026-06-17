@@ -4,8 +4,8 @@ import {
   ArrowLeft,
   Bell,
   Bot,
-  CheckCircle2,
   ClipboardCheck,
+  Eye,
   Filter,
   Headphones,
   Image as ImageIcon,
@@ -186,6 +186,15 @@ function humanDate(value) {
   return date.toLocaleDateString();
 }
 
+function formatJson(value) {
+  if (value === undefined || value === null) return "";
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
 function normalizeConversation(item) {
   const last = item.messages?.[0];
   const lastMessage = last?.contentType === "IMAGE"
@@ -199,6 +208,28 @@ function normalizeConversation(item) {
     lastMessage,
     lastTimestamp: item.lastMessageAt || last?.timestamp || item.updatedAt,
   };
+}
+
+function actionStatusLabel(status) {
+  const labels = {
+    EXECUTED: "Ejecutada",
+    FAILED: "Fallida",
+    PROPOSED: "Pendiente",
+    SKIPPED: "Omitida",
+  };
+  return labels[status] || status || "Sin estado";
+}
+
+function summarizeAction(action) {
+  if (action.error) return action.error;
+  const changed = action.output?.changed;
+  if (changed?.after) {
+    const target = changed.after.participantName || changed.after.dorsal || changed.after.evento_distancia;
+    return target ? `Resultado ${changed.resultId || changed.after.result_id || ""}: ${target}` : "Cambio aplicado en Exotimer.";
+  }
+  if (action.output?.type) return action.output.type;
+  if (action.input?.requestedValue) return `Valor solicitado: ${action.input.requestedValue}`;
+  return "Accion registrada por la IA.";
 }
 
 function MessageMedia({ message, onPreview }) {
@@ -485,6 +516,94 @@ function ConfigurationModal({ open, onClose }) {
   );
 }
 
+function AiActionsModal({ open, onClose, conversation, actions = [] }) {
+  const [expandedId, setExpandedId] = useState(null);
+
+  useEffect(() => {
+    if (open) setExpandedId(actions[0]?.id || null);
+  }, [open, actions]);
+
+  if (!open) return null;
+
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true">
+      <section className="config-modal actions-modal">
+        <header className="config-header">
+          <div>
+            <p className="eyebrow">Auditoria IA</p>
+            <h2>Acciones IA</h2>
+            <p>{conversation?.name || "Conversacion"} · {actions.length} acciones registradas</p>
+          </div>
+          <button className="icon-button" onClick={onClose} title="Cerrar">
+            <ArrowLeft size={18} />
+          </button>
+        </header>
+
+        <div className="actions-modal-body">
+          {actions.length === 0 ? (
+            <div className="config-empty">Esta conversacion todavia no tiene acciones registradas.</div>
+          ) : (
+            <div className="action-accordion-list">
+              {actions.map((action) => {
+                const expanded = expandedId === action.id;
+                return (
+                  <article key={action.id} className={`action-accordion ${String(action.status || "").toLowerCase()}`}>
+                    <button
+                      type="button"
+                      className="action-accordion-summary"
+                      onClick={() => setExpandedId(expanded ? null : action.id)}
+                    >
+                      <span>
+                        <strong>#{action.id} · {action.name}</strong>
+                        <small>{summarizeAction(action)}</small>
+                      </span>
+                      <span className={`action-status ${String(action.status || "").toLowerCase()}`}>
+                        {actionStatusLabel(action.status)}
+                      </span>
+                    </button>
+
+                    {expanded && (
+                      <div className="action-accordion-detail">
+                        <div className="action-detail-grid">
+                          <span>
+                            <strong>Usuario</strong>
+                            {USER_LABELS[action.userType] || action.userType || "Cliente"}
+                          </span>
+                          <span>
+                            <strong>Fecha</strong>
+                            {action.createdAt ? `${humanDate(action.createdAt)} ${humanTime(action.createdAt)}` : "Sin fecha"}
+                          </span>
+                          <span>
+                            <strong>Mensaje</strong>
+                            {action.messageId ? `#${action.messageId}` : "No asociado"}
+                          </span>
+                        </div>
+
+                        {action.error && <div className="action-error">{action.error}</div>}
+
+                        <details open>
+                          <summary>Input</summary>
+                          <pre>{formatJson(action.input)}</pre>
+                        </details>
+                        {action.output && (
+                          <details>
+                            <summary>Output</summary>
+                            <pre>{formatJson(action.output)}</pre>
+                          </details>
+                        )}
+                      </div>
+                    )}
+                  </article>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 const EMPTY_TIMER_FORM = {
   id: null,
   name: "",
@@ -693,6 +812,7 @@ function SupportApp({ onBack }) {
   const [conversations, setConversations] = useState([]);
   const [selected, setSelected] = useState(null);
   const [messages, setMessages] = useState([]);
+  const [conversationActions, setConversationActions] = useState([]);
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState("ALL");
   const [draft, setDraft] = useState("");
@@ -704,6 +824,7 @@ function SupportApp({ onBack }) {
   const [pendingActions, setPendingActions] = useState([]);
   const [configOpen, setConfigOpen] = useState(false);
   const [timersOpen, setTimersOpen] = useState(false);
+  const [actionsModalOpen, setActionsModalOpen] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [pushStatus, setPushStatus] = useState(() => {
     if (!supportsPushNotifications()) return "unsupported";
@@ -812,9 +933,13 @@ function SupportApp({ onBack }) {
       })
       .then((data) => {
         setMessages(Array.isArray(data.messages) ? data.messages : []);
+        setConversationActions(Array.isArray(data.actions) ? data.actions : []);
       })
       .catch(() => {
-        if (!silent) setMessages([]);
+        if (!silent) {
+          setMessages([]);
+          setConversationActions([]);
+        }
       })
       .finally(() => {
         if (!silent) setLoadingChat(false);
@@ -823,6 +948,7 @@ function SupportApp({ onBack }) {
 
   useEffect(() => {
     if (!selected) return;
+    setConversationActions([]);
     loadMessages(selected);
     const interval = window.setInterval(() => loadMessages(selected, { silent: true }), 8000);
 
@@ -1133,10 +1259,16 @@ function SupportApp({ onBack }) {
                   <h2>{selected.name}</h2>
                   <p>{selected.phone} · {USER_LABELS[selected.userType]}</p>
                 </div>
-                <span className="ai-badge">
-                  <CheckCircle2 size={15} />
-                  IA
-                </span>
+                <button
+                  type="button"
+                  className="ai-badge action-audit-trigger"
+                  onClick={() => setActionsModalOpen(true)}
+                  title="Ver acciones IA"
+                >
+                  <Eye size={15} />
+                  Acciones IA
+                  {conversationActions.length > 0 && <strong>{conversationActions.length}</strong>}
+                </button>
               </div>
 
               <div className="messages" ref={chatRef}>
@@ -1192,6 +1324,12 @@ function SupportApp({ onBack }) {
 
       <TimersModal open={timersOpen} onClose={() => setTimersOpen(false)} />
       <ConfigurationModal open={configOpen} onClose={() => setConfigOpen(false)} />
+      <AiActionsModal
+        open={actionsModalOpen}
+        onClose={() => setActionsModalOpen(false)}
+        conversation={selected}
+        actions={conversationActions}
+      />
       {filtersOpen && (
         <div className="filter-drawer-backdrop mobile-only" role="dialog" aria-modal="true" onClick={() => setFiltersOpen(false)}>
           <section className="filter-drawer" onClick={(event) => event.stopPropagation()}>
