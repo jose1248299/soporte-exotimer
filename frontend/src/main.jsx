@@ -518,10 +518,28 @@ function ConfigurationModal({ open, onClose }) {
 
 function AiActionsModal({ open, onClose, conversation, actions = [] }) {
   const [expandedId, setExpandedId] = useState(null);
+  const previousOpenRef = useRef(false);
+  const previousConversationIdRef = useRef(null);
 
   useEffect(() => {
-    if (open) setExpandedId(actions[0]?.id || null);
-  }, [open, actions]);
+    if (!open) {
+      previousOpenRef.current = false;
+      return;
+    }
+
+    const conversationChanged = previousConversationIdRef.current !== conversation?.id;
+    const justOpened = !previousOpenRef.current;
+    setExpandedId((current) => {
+      if (!actions.length) return null;
+      if (!justOpened && !conversationChanged && actions.some((action) => action.id === current)) {
+        return current;
+      }
+      return actions[0].id;
+    });
+
+    previousOpenRef.current = true;
+    previousConversationIdRef.current = conversation?.id || null;
+  }, [open, conversation?.id, actions]);
 
   if (!open) return null;
 
