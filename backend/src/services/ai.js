@@ -65,6 +65,17 @@ function heuristicClassify(text, forcedTimer) {
   }
 
   const lower = String(text || "").toLowerCase();
+  if (/(no recib|correo|confirmaci|inscripci|inscrito|pago|voucher|yape|plin)/.test(lower)) {
+    return {
+      ...fallbackClassification,
+      userType: "ATHLETE",
+      confidence: 0.7,
+      intent: "inscription_support",
+      summary: "Participante solicita soporte sobre inscripcion, pago o correo de confirmacion.",
+      actionInput: { message: text },
+      needsHuman: false,
+    };
+  }
   if (/(precio|cotiza|costo|cu[aá]nto|paquete|servicio)/.test(lower)) {
     return {
       ...fallbackClassification,
@@ -127,7 +138,7 @@ async function classifyMessage({ text, forcedTimer, previousClassification, prev
     "- Usa el historial y la clasificacion anterior para entender mensajes cortos de continuidad como nombres, dorsales, confirmaciones o aclaraciones.",
     "- Si el mensaje actual completa datos pedidos antes, conserva el userType, intent, action y actionInput anterior, agregando solo los datos nuevos.",
     "- No cambies a UNKNOWN si el historial muestra claramente que la conversacion sigue siendo sobre el mismo caso.",
-    "- Extrae y conserva campos utiles: competitionName, competitionId, dorsal, bib, currentDorsal, athleteName, participantName, participantLastname, requestedCorrection, targetField, currentValue, requestedValue, newDorsal, newDistance, newGender, newCategory, eventName, ticketName, phone.",
+    "- Extrae y conserva campos utiles: competitionName, competitionId, dorsal, bib, currentDorsal, athleteName, participantName, participantLastname, requestedCorrection, targetField, currentValue, requestedValue, newDorsal, newDistance, newGender, newCategory, eventName, ticketName, phone, email, document, dni, inscriptionReference, paymentEvidence, correctEmail, requestedEmail, newEmail.",
     "- Los dorsales no tienen ceros a la izquierda. Si recibes 002, 02 o 0002, interpreta y devuelve dorsal=2. Aplica esto tambien a bib, currentDorsal, newDorsal, detectedDorsals y detectedAthletes[].dorsal.",
     "- Si el usuario menciona varios dorsales o varias personas del equipo, NO dividas el caso. Devuelve detectedDorsals como array de strings y detectedAthletes como array de objetos {name,dorsal} cuando puedas.",
     "- Conserva detectedDorsals y detectedAthletes previos del contexto, agregando nuevos sin perder los anteriores.",
@@ -147,6 +158,11 @@ async function classifyMessage({ text, forcedTimer, previousClassification, prev
     "- Para cambiar nombre, apellido u otros datos personales visibles del participante usa EXOTIMER_UPDATE_RESULT_PARTICIPANT_DATA con competitionId, dorsal, targetField, currentValue, requestedValue y participantName/participantLastname cuando corresponda.",
     "- En estos cambios permitidos de atleta, usa needsHuman=false si tienes competitionId o competitionName, dorsal/resultId y el valor correcto solicitado. Si falta algun dato esencial, usa action=null y pide el dato faltante.",
     "- Para atletas, consulta primero inscripcion/resultados cuando existan evento y dorsal. Registra EXOTIMER_CREATE_RESULT_CORRECTION_CASE solo cuando haya datos minimos del caso y una correccion/reporte concreto.",
+    "- Para atletas con problemas de inscripcion, correo de confirmacion, pago, voucher, no aparezco inscrito, correo mal escrito o no me llego el email: clasifica como ATHLETE, no como ORGANIZER.",
+    "- Para esos casos de inscripcion usa EXOTIMER_GET_INSCRIPTION_BY_REFERENCE_OR_DOCUMENT si tienes competitionId o competitionName y al menos uno de: inscriptionReference, document/dni, email, phone o participantName. No pidas dorsal para inscripciones.",
+    "- Si el usuario adjunta comprobante de pago o la imagen analizada indica paymentEvidence/hasStrongEvidence, usa EXOTIMER_VALIDATE_PAYMENT_EVIDENCE con competitionId, inscriptionReference/document/email/phone/participantName y paymentEvidence. Esta accion solo verifica; no aprueba pagos ni afirma que el correo fue reenviado.",
+    "- Si el usuario dice que ingreso mal su correo y da el correo correcto, puedes usar EXOTIMER_UPDATE_INSCRIPTION_EMAIL con competitionId, referencia/DNI/email/phone/nombre para ubicar la inscripcion y newEmail/correctEmail/requestedEmail. Usa needsHuman=false solo si hay una unica coincidencia clara por DNI o referencia; si solo coincide por nombre, needsHuman=true.",
+    "- Si la inscripcion existe y el correo registrado coincide, pero el usuario no recibio confirmacion, no inventes reenvio. Indica que se verifico la inscripcion/correo y que queda pendiente reenviar o revisar entrega del correo si no hay accion automatica disponible.",
     "- Para compradores, usa BUYER_CREATE_PRICE_INQUIRY; la cotizacion comercial vive fuera de Exotimer.",
     "Contexto persistente:",
     JSON.stringify({

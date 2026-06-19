@@ -82,6 +82,9 @@ function actionNeedsCompetitionId(actionName) {
     "EXOTIMER_GET_COMPETITION_EVENTS",
     "EXOTIMER_GET_TICKETS",
     "EXOTIMER_GET_INSCRIPTION",
+    "EXOTIMER_GET_INSCRIPTION_BY_REFERENCE_OR_DOCUMENT",
+    "EXOTIMER_VALIDATE_PAYMENT_EVIDENCE",
+    "EXOTIMER_UPDATE_INSCRIPTION_EMAIL",
     "EXOTIMER_GET_RESULTS",
     "EXOTIMER_UPDATE_RESULT_PARTICIPANT_DATA",
     "EXOTIMER_UPDATE_RESULT_DORSAL",
@@ -158,6 +161,41 @@ function missingFieldsForAction(actionName, input = {}) {
 
   if (actionName === "EXOTIMER_GET_INSCRIPTION" && !(input.dorsal || input.bib)) {
     missing.push("dorsal");
+  }
+
+  if (
+    ["EXOTIMER_GET_INSCRIPTION_BY_REFERENCE_OR_DOCUMENT", "EXOTIMER_VALIDATE_PAYMENT_EVIDENCE", "EXOTIMER_UPDATE_INSCRIPTION_EMAIL"].includes(
+      actionName
+    )
+  ) {
+    const hasLookupReference = Boolean(
+      input.inscriptionId ||
+        input.inscription_id ||
+        input.inscriptionReference ||
+        input.reference ||
+        input.codigoInscripcion ||
+        input.codigo ||
+        input.pk ||
+        input.document ||
+        input.dni ||
+        input.identityDocument ||
+        input.email ||
+        input.expectedEmail ||
+        input.correctEmail ||
+        input.requestedEmail ||
+        input.phone ||
+        input.telefono ||
+        input.celular ||
+        input.participantName ||
+        input.athleteName ||
+        input.name
+    );
+    if (!hasLookupReference) missing.push("inscription_reference_or_document");
+
+    if (actionName === "EXOTIMER_UPDATE_INSCRIPTION_EMAIL") {
+      const hasNewEmail = Boolean(input.newEmail || input.correctEmail || input.requestedEmail || input.email);
+      if (!hasNewEmail) missing.push("newEmail");
+    }
   }
 
   if (resultUpdateActions.includes(actionName)) {

@@ -37,6 +37,21 @@ const ACTIONS = {
     risk: SAFE_READ,
     description: "Verifica una inscripcion por competencia y dorsal.",
   },
+  EXOTIMER_GET_INSCRIPTION_BY_REFERENCE_OR_DOCUMENT: {
+    roles: ["ORGANIZER", "ATHLETE", "TIMER"],
+    risk: SAFE_READ,
+    description: "Busca una inscripcion por id/referencia, DNI, correo, telefono o nombre.",
+  },
+  EXOTIMER_VALIDATE_PAYMENT_EVIDENCE: {
+    roles: ["ORGANIZER", "ATHLETE", "TIMER"],
+    risk: SAFE_READ,
+    description: "Valida si la evidencia de pago coincide con una inscripcion encontrada.",
+  },
+  EXOTIMER_UPDATE_INSCRIPTION_EMAIL: {
+    roles: ["ORGANIZER", "ATHLETE", "TIMER"],
+    risk: SAFE_WRITE,
+    description: "Corrige el correo de una inscripcion encontrada y conserva el resto del documento.",
+  },
   EXOTIMER_GET_RESULTS: {
     roles: ["TIMER", "ATHLETE"],
     risk: SAFE_READ,
@@ -410,6 +425,277 @@ async function getInscription(input) {
   return {
     ...buildAudit({ path: request.path, params: request.params, response }),
     data: response,
+  };
+}
+
+function normalizeLoose(value) {
+  return normalizeText(value).replace(/[^a-z0-9]+/g, "");
+}
+
+function normalizeDigits(value) {
+  return String(value ?? "").replace(/\D+/g, "");
+}
+
+function normalizeEmail(value) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function pickInscriptionDocument(inscription = {}) {
+  return inscription.document && typeof inscription.document === "object" ? inscription.document : {};
+}
+
+function pickParticipant(inscription = {}) {
+  return inscription.participant && typeof inscription.participant === "object" ? inscription.participant : {};
+}
+
+function inscriptionFullName(inscription = {}) {
+  const document = pickInscriptionDocument(inscription);
+  const participant = pickParticipant(inscription);
+  return [
+    document.nombre || document.name || participant.name,
+    document.apellidos || document.lastname || document.lastname_mother || participant.lastname,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+}
+
+function requestedInscriptionReference(input = {}) {
+  return clean(
+    input.inscriptionId ||
+      input.inscription_id ||
+      input.inscriptionReference ||
+      input.reference ||
+      input.codigoInscripcion ||
+      input.codigo ||
+      input.pk
+  );
+}
+
+function buildInscriptionSearchTerms(input = {}) {
+  return {
+    reference: requestedInscriptionReference(input),
+    document: clean(input.document || input.dni || input.identityDocument),
+    email: clean(input.email || input.expectedEmail || input.correctEmail || input.requestedEmail),
+    phone: clean(input.phone || input.telefono || input.celular),
+    name: clean(input.participantName || input.athleteName || input.name),
+  };
+}
+
+function scoreInscription(inscription, terms) {
+  let score = 0;
+  const reasons = [];
+  const document = pickInscriptionDocument(inscription);
+  const participant = pickParticipant(inscription);
+
+  if (terms.reference) {
+    const wanted = normalizeDigits(terms.reference);
+    const candidates = [
+      inscription.id,
+      inscription.pk,
+      document.id,
+      document.ID,
+      document.codigo,
+      document.reference,
+      document.inscriptionReference,
+      document["Codigo/Referencia de inscripcion"],
+    ].map(normalizeDigits);
+    if (wanted && candidates.includes(wanted)) {
+      score += 120;
+      reasons.push("reference");
+    }
+  }
+
+  if (terms.document) {
+    const wanted = normalizeDigits(terms.document);
+    const current = normalizeDigits(document.dni || document.document || participant.dni);
+    if (wanted && current && wanted === current) {
+      score += 100;
+      reasons.push("document");
+    }
+  }
+
+  if (terms.email) {
+    const wanted = normalizeEmail(terms.email);
+    const current = normalizeEmail(document.email || participant.email);
+    if (wanted && current && wanted === current) {
+      score += 80;
+      reasons.push("email");
+    }
+  }
+
+  if (terms.phone) {
+    const wanted = normalizeDigits(terms.phone);
+    const current = normalizeDigits(document.phone || document.telefono || document.celular || participant.phone);
+    if (wanted && current && (wanted === current || wanted.endsWith(current) || current.endsWith(wanted))) {
+      score += 70;
+      reasons.push("phone");
+    }
+  }
+
+  if (terms.name) {
+    const wanted = normalizeLoose(terms.name);
+    const current = normalizeLoose(inscriptionFullName(inscription));
+    if (wanted.length >= 4 && current && (current.includes(wanted) || wanted.includes(current))) {
+      score += 45;
+      reasons.push("name");
+    }
+  }
+
+  return { score, reasons };
+}
+
+function summarizeInscription(inscription = {}, terms = {}) {
+  const document = pickInscriptionDocument(inscription);
+  const participant = pickParticipant(inscription);
+  const email = clean(document.email || participant.email);
+  const expectedEmail = clean(terms.email);
+  return {
+    id: inscription.id || inscription.pk || null,
+    participantId: participant.id || null,
+    name: inscriptionFullName(inscription) || null,
+    dni: clean(document.dni || document.document || participant.dni) || null,
+    email: email || null,
+    phone: clean(document.phone || document.telefono || document.celular || participant.phone) || null,
+    distance: clean(document.distancia || document.distance) || null,
+    category: clean(document.categoria || document.category) || null,
+    gender: clean(document.genero || document.gender || participant.genre) || null,
+    dorsal: clean(document.dorsal || document._dorsal || document.bib) || null,
+    amount: clean(document.precio_inscripcion || document.amount || inscription.amount) || null,
+    voucher: inscription.voucher || null,
+    voucherState: inscription.state_voucher ?? null,
+    coupon: inscription.cupon_usado || null,
+    emailMatchesExpected: expectedEmail && email ? normalizeEmail(expectedEmail) === normalizeEmail(email) : null,
+    documentData: { ...document },
+  };
+}
+
+async function getInscriptionByReferenceOrDocument(input = {}) {
+  const competitionId = pickCompetitionId(input);
+  const terms = buildInscriptionSearchTerms(input);
+  if (!Object.values(terms).some(Boolean)) {
+    throw new Error("Falta referencia, DNI, correo, telefono o nombre para buscar la inscripcion.");
+  }
+
+  const request = { path: `/api/inscription/list/${competitionId}/` };
+  const response = await apiRequest(request);
+  const rows = asArray(response);
+  const scored = rows
+    .map((row) => ({ row, ...scoreInscription(row, terms) }))
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  const best = scored[0] || null;
+  const second = scored[1] || null;
+  const ambiguous = Boolean(best && second && best.score === second.score);
+  const found = Boolean(best && !ambiguous);
+
+  return {
+    ...buildAudit({ path: request.path, response: { count: rows.length, matched: scored.length } }),
+    found,
+    ambiguous,
+    competitionId: Number(competitionId),
+    search: terms,
+    bestMatch: found ? summarizeInscription(best.row, terms) : null,
+    candidates: scored.slice(0, 5).map((item) => ({
+      score: item.score,
+      reasons: item.reasons,
+      inscription: summarizeInscription(item.row, terms),
+    })),
+  };
+}
+
+function pickPaymentEvidence(input = {}) {
+  const evidence = input.paymentEvidence && typeof input.paymentEvidence === "object" ? input.paymentEvidence : {};
+  return {
+    amount: clean(input.paymentAmount || input.amount || evidence.amount),
+    operationNumber: clean(input.operationNumber || evidence.operationNumber),
+    date: clean(input.paymentDate || evidence.date),
+    time: clean(input.paymentTime || evidence.time),
+    type: clean(input.paymentType || evidence.type),
+    confidence: Number(input.evidenceConfidence ?? evidence.confidence ?? 0),
+    summary: clean(input.evidenceSummary || evidence.evidenceSummary || evidence.summary),
+    hasStrongEvidence:
+      input.hasStrongEvidence === true || evidence.hasStrongEvidence === true || Number(evidence.confidence) >= 0.85,
+  };
+}
+
+async function validatePaymentEvidence(input = {}) {
+  const lookup = await getInscriptionByReferenceOrDocument(input);
+  const evidence = pickPaymentEvidence(input);
+  const match = lookup.bestMatch;
+  const expectedRaw = String(match?.amount || "").replace(/[^\d.]+/g, "");
+  const paidRaw = String(evidence.amount || "").replace(/[^\d.]+/g, "");
+  const expectedAmount = expectedRaw ? Number(expectedRaw) : null;
+  const paidAmount = paidRaw ? Number(paidRaw) : null;
+  const amountMatches =
+    Number.isFinite(expectedAmount) && expectedAmount > 0 && Number.isFinite(paidAmount) && paidAmount > 0
+      ? Math.abs(expectedAmount - paidAmount) < 0.01
+      : null;
+  const paymentLooksValid = Boolean(
+    lookup.found && evidence.hasStrongEvidence && evidence.amount && (amountMatches === true || amountMatches === null)
+  );
+
+  return {
+    found: lookup.found,
+    ambiguous: lookup.ambiguous,
+    competitionId: lookup.competitionId,
+    inscription: match,
+    evidence,
+    validation: {
+      paymentLooksValid,
+      amountMatches,
+      expectedAmount: Number.isFinite(expectedAmount) ? expectedAmount : null,
+      paidAmount: Number.isFinite(paidAmount) ? paidAmount : null,
+      emailMatchesExpected: match?.emailMatchesExpected ?? null,
+      currentVoucherState: match?.voucherState ?? null,
+      requiresHumanForPaymentApproval: true,
+      reason: !lookup.found
+        ? "inscription_not_found"
+        : !evidence.hasStrongEvidence
+          ? "weak_or_missing_payment_evidence"
+          : amountMatches === false
+            ? "amount_mismatch"
+            : "payment_evidence_matches_inscription_but_payment_approval_is_human",
+    },
+    lookup,
+  };
+}
+
+async function updateInscriptionEmail(input = {}) {
+  const lookup = await getInscriptionByReferenceOrDocument(input);
+  if (!lookup.found || !lookup.bestMatch) {
+    throw new Error(lookup.ambiguous ? "La busqueda de inscripcion es ambigua." : "No se encontro la inscripcion.");
+  }
+
+  const nextEmail = clean(input.newEmail || input.correctEmail || input.requestedEmail || input.email);
+  if (!nextEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(nextEmail)) {
+    throw new Error("Falta un correo valido para actualizar.");
+  }
+
+  const document = {
+    ...(lookup.bestMatch.documentData || {}),
+    email: nextEmail,
+  };
+  const request = {
+    method: "POST",
+    path: "/api/inscription/update-admin/",
+    data: {
+      competition_id: String(lookup.competitionId),
+      pk: String(lookup.bestMatch.id),
+      document,
+    },
+  };
+  const response = await apiRequest(request);
+  return {
+    ...buildAudit({ method: request.method, path: request.path, payload: request.data, response }),
+    changed: {
+      competitionId: lookup.competitionId,
+      inscriptionId: lookup.bestMatch.id,
+      beforeEmail: lookup.bestMatch.email,
+      afterEmail: nextEmail,
+    },
+    saved: response,
   };
 }
 
@@ -1107,6 +1393,9 @@ const HANDLERS = {
   EXOTIMER_GET_TICKETS: getTickets,
   EXOTIMER_UPDATE_EVENT_TICKET: updateEventTicket,
   EXOTIMER_GET_INSCRIPTION: getInscription,
+  EXOTIMER_GET_INSCRIPTION_BY_REFERENCE_OR_DOCUMENT: getInscriptionByReferenceOrDocument,
+  EXOTIMER_VALIDATE_PAYMENT_EVIDENCE: validatePaymentEvidence,
+  EXOTIMER_UPDATE_INSCRIPTION_EMAIL: updateInscriptionEmail,
   EXOTIMER_GET_RESULTS: getResults,
   EXOTIMER_GET_RESULT_DETAIL: getResultDetail,
   EXOTIMER_CREATE_RESULT_CORRECTION_CASE: createResultCorrectionCase,
