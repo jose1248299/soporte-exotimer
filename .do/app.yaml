@@ -68,6 +68,9 @@ services:
       - key: OPENAI_MODEL
         value: gpt-4.1
         scope: RUN_TIME
+      - key: SUPPORT_REPLY_DEBOUNCE_MS
+        value: "8000"
+        scope: RUN_TIME
       - key: EXOTIMER_API_BASE_URL
         value: https://raceline.app
         scope: RUN_TIME

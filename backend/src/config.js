@@ -21,6 +21,9 @@ const config = {
   security: {
     exotimerApiKey: process.env.SUPPORT_EXOTIMER_API_KEY,
   },
+  support: {
+    replyDebounceMs: Number(process.env.SUPPORT_REPLY_DEBOUNCE_MS || 8000),
+  },
   push: {
     vapidSubject: process.env.PUSH_VAPID_SUBJECT || process.env.PUBLIC_BASE_URL || "mailto:soporte@finisherdata.com",
     vapidPublicKey: process.env.PUSH_VAPID_PUBLIC_KEY,

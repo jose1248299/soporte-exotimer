@@ -1,4 +1,5 @@
 const prisma = require("../lib/prisma");
+const config = require("../config");
 const { analyzeImageEvidence, classifyMessage, composeReply } = require("./ai");
 const { executeAction, requiresConfirmation } = require("./exotimerClient");
 const { getPolicy } = require("./supportPolicies");
@@ -7,6 +8,9 @@ const { findOrCreateSupportCase, pickCompetitionId } = require("./supportCases")
 const { downloadMedia, sendTextMessage } = require("./waba");
 const { normalizeDorsalReferences } = require("../utils/dorsal");
 const { normalizePhone } = require("../utils/phone");
+
+const replyDebounceTimers = new Map();
+const processorStartedAt = new Date();
 
 async function findOrCreateConversation({ phone, displayName }) {
   return prisma.conversation.upsert({
@@ -258,11 +262,313 @@ function buildProcessableText({ text, mediaAnalysis }) {
   return [text, buildImageAnalysisText(mediaAnalysis)].filter(Boolean).join("\n\n");
 }
 
+function inboundProcessableText(message) {
+  return buildProcessableText({
+    text: message.content,
+    mediaAnalysis: message.mediaAnalysis,
+  });
+}
+
+function buildCombinedProcessableText(messages) {
+  return messages
+    .filter((message) => message.direction === "INBOUND")
+    .map((message) => inboundProcessableText(message))
+    .filter(Boolean)
+    .join("\n\n---\n\n");
+}
+
+async function findPendingInboundMessages(conversationId) {
+  const lastOutbound = await prisma.message.findFirst({
+    where: { conversationId, direction: "OUTBOUND" },
+    orderBy: { timestamp: "desc" },
+    select: { timestamp: true, createdAt: true },
+  });
+
+  const candidates = await prisma.message.findMany({
+    where: {
+      conversationId,
+      direction: "INBOUND",
+    },
+    orderBy: { timestamp: "desc" },
+    take: 50,
+  });
+  const pending = [...candidates]
+    .reverse()
+    .filter((message) => {
+      if (message.aiMetadata?.debounceProcessedAt) return false;
+      if (!lastOutbound) return true;
+      if (message.timestamp > lastOutbound.timestamp) return true;
+      return message.createdAt >= processorStartedAt;
+    });
+
+  return pending;
+}
+
+function scheduleConversationProcessing(conversationId) {
+  const previous = replyDebounceTimers.get(conversationId);
+  if (previous) clearTimeout(previous);
+
+  const waitMs = Math.max(0, Number(config.support.replyDebounceMs || 8000));
+  const timer = setTimeout(() => {
+    replyDebounceTimers.delete(conversationId);
+    processConversationReply(conversationId).catch((error) => {
+      console.error(`Error procesando conversacion ${conversationId} tras debounce:`, error);
+    });
+  }, waitMs);
+
+  if (typeof timer.unref === "function") timer.unref();
+  replyDebounceTimers.set(conversationId, timer);
+}
+
 async function processInboundText(args) {
   return processInboundMessage({
     ...args,
     type: "text",
   });
+}
+
+async function processConversationReply(conversationId) {
+  const conversation = await prisma.conversation.findUnique({
+    where: { id: conversationId },
+  });
+  if (!conversation) return null;
+
+  const timer = await prisma.timerContact.findFirst({
+    where: { phone: conversation.phone, active: true },
+  });
+
+  const pendingInboundMessages = await findPendingInboundMessages(conversation.id);
+  if (!pendingInboundMessages.length) return null;
+
+  const recentMessages = await prisma.message.findMany({
+    where: { conversationId: conversation.id },
+    orderBy: { timestamp: "desc" },
+    take: 12,
+  });
+  const history = [...recentMessages].reverse().map(compactMessage);
+  const processableText = buildCombinedProcessableText(pendingInboundMessages);
+  const triggerMessage = pendingInboundMessages[pendingInboundMessages.length - 1];
+
+  let classification = await classifyMessage({
+    text: processableText,
+    forcedTimer: Boolean(timer),
+    previousClassification: conversation.classification,
+    previousUserType: conversation.userType,
+    conversationStatus: conversation.status,
+    history,
+  });
+  classification = mergeClassificationWithConversation(classification, conversation);
+  classification = {
+    ...classification,
+    actionInput: normalizeDorsalReferences(classification.actionInput || {}),
+  };
+
+  const userType = timer ? "TIMER" : classification.userType;
+  const contextResolution = await resolveCompetitionForAction(userType, classification);
+  classification = contextResolution.classification;
+
+  const missingFields = missingFieldsForAction(classification.action, classification.actionInput);
+  if (missingFields.length) {
+    classification = {
+      ...classification,
+      action: null,
+      needsHuman: false,
+      actionInput: {
+        ...(classification.actionInput || {}),
+        missingFields,
+      },
+      summary: `${classification.summary} Faltan datos para ejecutar la accion automatica.`,
+    };
+  } else if (classification.actionInput?.missingFields) {
+    const { missingFields: _missingFields, ...actionInput } = classification.actionInput;
+    classification = {
+      ...classification,
+      actionInput,
+    };
+  }
+
+  if (
+    classification.action === "EXOTIMER_CREATE_RESULT_CORRECTION_CASE" &&
+    !hasMinimumCorrectionContext(classification.actionInput)
+  ) {
+    classification = {
+      ...classification,
+      action: null,
+      needsHuman: false,
+      summary: `${classification.summary} Faltan datos minimos para registrar el caso.`,
+    };
+  }
+
+  const supportCase = await findOrCreateSupportCase({
+    conversationId: conversation.id,
+    userType,
+    classification,
+    timestamp: triggerMessage.timestamp,
+  });
+  const competitionId = supportCase?.competitionId || pickCompetitionId(classification.actionInput);
+
+  if (supportCase || competitionId) {
+    await prisma.message.updateMany({
+      where: { id: { in: pendingInboundMessages.map((message) => message.id) } },
+      data: {
+        supportCaseId: supportCase?.id || null,
+        competitionId,
+      },
+    });
+  }
+
+  await Promise.all(
+    pendingInboundMessages.map((message) =>
+      prisma.message.update({
+        where: { id: message.id },
+        data: {
+          aiMetadata: {
+            ...(message.aiMetadata || {}),
+            debounceProcessedAt: new Date().toISOString(),
+            debounceBatchLastMessageId: triggerMessage.id,
+          },
+        },
+      })
+    )
+  );
+
+  await prisma.conversation.update({
+    where: { id: conversation.id },
+    data: {
+      userType,
+      confidence: classification.confidence,
+      classification,
+      status: classification.needsHuman ? "WAITING_HUMAN" : "OPEN",
+      lastMessageAt: triggerMessage.timestamp,
+    },
+  });
+
+  let actionResult = null;
+  let actionError = null;
+  let actionPending = null;
+  const contextActionResult = contextResolution.contextActionResult;
+  const contextActionError = contextResolution.contextActionError;
+
+  if (classification.action) {
+    const policy = await getPolicy(userType, classification.action);
+    const action = await prisma.supportAction.create({
+      data: {
+        conversationId: conversation.id,
+        supportCaseId: supportCase?.id || null,
+        messageId: triggerMessage.id,
+        userType,
+        name: classification.action,
+        input: {
+          ...(classification.actionInput || {}),
+          policy: {
+            enabled: policy.enabled,
+            requiresHuman: policy.requiresHuman,
+            source: policy.source,
+          },
+        },
+      },
+    });
+
+    const actionInput = {
+      ...classification.actionInput,
+      source: "whatsapp",
+      phone: conversation.phone,
+      message: processableText,
+    };
+
+    if (!policy.enabled) {
+      actionPending = {
+        actionId: action.id,
+        action: classification.action,
+        reason: "disabled_by_support_policy",
+      };
+      await prisma.supportAction.update({
+        where: { id: action.id },
+        data: { status: "SKIPPED", error: "Accion deshabilitada por configuracion." },
+      });
+      await prisma.conversation.update({
+        where: { id: conversation.id },
+        data: { status: "WAITING_HUMAN" },
+      });
+    } else if ((policy.requiresHuman || requiresConfirmation(classification.action)) && !classification.actionInput?.confirmed) {
+      actionPending = {
+        actionId: action.id,
+        action: classification.action,
+        reason: "requires_human_confirmation",
+      };
+      await prisma.conversation.update({
+        where: { id: conversation.id },
+        data: { status: "WAITING_HUMAN" },
+      });
+    } else {
+      try {
+        actionResult = await executeAction(userType, classification.action, actionInput, {
+          allowByPolicy: true,
+        });
+
+        await prisma.supportAction.update({
+          where: { id: action.id },
+          data: { status: "EXECUTED", output: actionResult },
+        });
+      } catch (error) {
+        actionError = error.message;
+        await prisma.supportAction.update({
+          where: { id: action.id },
+          data: { status: "FAILED", error: actionError },
+        });
+      }
+    }
+  }
+
+  const reply = await composeReply({
+    userType,
+    text: processableText,
+    classification,
+    actionResult,
+    actionError,
+    actionPending,
+    contextActionResult,
+    contextActionError,
+    history,
+  });
+
+  let sent = null;
+  try {
+    sent = await sendTextMessage(conversation.phone, reply);
+  } catch (error) {
+    console.error("No se pudo enviar respuesta WhatsApp:", error.response?.data || error.message);
+  }
+
+  await prisma.message.create({
+    data: {
+      conversationId: conversation.id,
+      supportCaseId: supportCase?.id || null,
+      competitionId: competitionId || null,
+      direction: "OUTBOUND",
+      phone: conversation.phone,
+      content: reply,
+      aiMetadata: {
+        classification,
+        actionResult,
+        actionError,
+        actionPending,
+        contextActionResult,
+        contextActionError,
+        providerMessageId: sent?.messages?.[0]?.id || null,
+      },
+      timestamp: new Date(),
+    },
+  });
+
+  return {
+    duplicated: false,
+    conversationId: conversation.id,
+    supportCaseId: supportCase?.id || null,
+    inboundMessageId: triggerMessage.id,
+    processedInboundMessageIds: pendingInboundMessages.map((message) => message.id),
+    userType,
+    reply,
+  };
 }
 
 async function processInboundMessage({ waId, from, text = "", timestamp, rawPayload, displayName, type = "text", media }) {
@@ -327,10 +633,7 @@ async function processInboundMessage({ waId, from, text = "", timestamp, rawPayl
     }
   }
 
-  const content = contentType === "IMAGE"
-    ? baseContent || "[Imagen recibida]"
-    : baseContent;
-  const processableText = buildProcessableText({ text: content, mediaAnalysis });
+  const content = contentType === "IMAGE" ? baseContent || "[Imagen recibida]" : baseContent;
 
   const inbound = await prisma.message.create({
     data: {
@@ -355,216 +658,14 @@ async function processInboundMessage({ waId, from, text = "", timestamp, rawPayl
     console.warn("No se pudo enviar notificacion push:", error.message);
   });
 
-  const recentMessages = await prisma.message.findMany({
-    where: { conversationId: conversation.id },
-    orderBy: { timestamp: "desc" },
-    take: 12,
-  });
-  const history = [...recentMessages].reverse().map(compactMessage);
-
-  let classification = await classifyMessage({
-    text: processableText,
-    forcedTimer: Boolean(timer),
-    previousClassification: conversation.classification,
-    previousUserType: conversation.userType,
-    conversationStatus: conversation.status,
-    history,
-  });
-  classification = mergeClassificationWithConversation(classification, conversation);
-  classification = {
-    ...classification,
-    actionInput: normalizeDorsalReferences(classification.actionInput || {}),
-  };
-
-  const userType = timer ? "TIMER" : classification.userType;
-  const contextResolution = await resolveCompetitionForAction(userType, classification);
-  classification = contextResolution.classification;
-
-  const missingFields = missingFieldsForAction(classification.action, classification.actionInput);
-  if (missingFields.length) {
-    classification = {
-      ...classification,
-      action: null,
-      needsHuman: false,
-      actionInput: {
-        ...(classification.actionInput || {}),
-        missingFields,
-      },
-      summary: `${classification.summary} Faltan datos para ejecutar la accion automatica.`,
-    };
-  } else if (classification.actionInput?.missingFields) {
-    const { missingFields: _missingFields, ...actionInput } = classification.actionInput;
-    classification = {
-      ...classification,
-      actionInput,
-    };
-  }
-
-  if (
-    classification.action === "EXOTIMER_CREATE_RESULT_CORRECTION_CASE" &&
-    !hasMinimumCorrectionContext(classification.actionInput)
-  ) {
-    classification = {
-      ...classification,
-      action: null,
-      needsHuman: false,
-      summary: `${classification.summary} Faltan datos minimos para registrar el caso.`,
-    };
-  }
-
-  const supportCase = await findOrCreateSupportCase({
-    conversationId: conversation.id,
-    userType,
-    classification,
-    timestamp,
-  });
-  const competitionId = supportCase?.competitionId || pickCompetitionId(classification.actionInput);
-
-  if (supportCase || competitionId) {
-    await prisma.message.update({
-      where: { id: inbound.id },
-      data: {
-        supportCaseId: supportCase?.id || null,
-        competitionId,
-      },
-    });
-  }
-
-  await prisma.conversation.update({
-    where: { id: conversation.id },
-    data: {
-      userType,
-      confidence: classification.confidence,
-      classification,
-      status: classification.needsHuman ? "WAITING_HUMAN" : "OPEN",
-      lastMessageAt: timestamp,
-    },
-  });
-
-  let actionResult = null;
-  let actionError = null;
-  let actionPending = null;
-  const contextActionResult = contextResolution.contextActionResult;
-  const contextActionError = contextResolution.contextActionError;
-
-  if (classification.action) {
-    const policy = await getPolicy(userType, classification.action);
-    const action = await prisma.supportAction.create({
-      data: {
-        conversationId: conversation.id,
-        supportCaseId: supportCase?.id || null,
-        messageId: inbound.id,
-        userType,
-        name: classification.action,
-        input: {
-          ...(classification.actionInput || {}),
-          policy: {
-            enabled: policy.enabled,
-            requiresHuman: policy.requiresHuman,
-            source: policy.source,
-          },
-        },
-      },
-    });
-
-    const actionInput = {
-      ...classification.actionInput,
-      source: "whatsapp",
-      phone,
-      message: processableText,
-    };
-
-    if (!policy.enabled) {
-      actionPending = {
-        actionId: action.id,
-        action: classification.action,
-        reason: "disabled_by_support_policy",
-      };
-      await prisma.supportAction.update({
-        where: { id: action.id },
-        data: { status: "SKIPPED", error: "Accion deshabilitada por configuracion." },
-      });
-      await prisma.conversation.update({
-        where: { id: conversation.id },
-        data: { status: "WAITING_HUMAN" },
-      });
-    } else if ((policy.requiresHuman || requiresConfirmation(classification.action)) && !classification.actionInput?.confirmed) {
-      actionPending = {
-        actionId: action.id,
-        action: classification.action,
-        reason: "requires_human_confirmation",
-      };
-      await prisma.conversation.update({
-        where: { id: conversation.id },
-        data: { status: "WAITING_HUMAN" },
-      });
-    } else {
-      try {
-        actionResult = await executeAction(userType, classification.action, actionInput, {
-          allowByPolicy: true,
-        });
-
-        await prisma.supportAction.update({
-          where: { id: action.id },
-          data: { status: "EXECUTED", output: actionResult },
-        });
-      } catch (error) {
-        actionError = error.message;
-        await prisma.supportAction.update({
-          where: { id: action.id },
-          data: { status: "FAILED", error: actionError },
-        });
-      }
-    }
-  }
-
-  const reply = await composeReply({
-    userType,
-    text: processableText,
-    classification,
-    actionResult,
-    actionError,
-    actionPending,
-    contextActionResult,
-    contextActionError,
-    history,
-  });
-
-  let sent = null;
-  try {
-    sent = await sendTextMessage(phone, reply);
-  } catch (error) {
-    console.error("No se pudo enviar respuesta WhatsApp:", error.response?.data || error.message);
-  }
-
-  await prisma.message.create({
-    data: {
-      conversationId: conversation.id,
-      supportCaseId: supportCase?.id || null,
-      competitionId: competitionId || null,
-      direction: "OUTBOUND",
-      phone,
-      content: reply,
-      aiMetadata: {
-        classification,
-        actionResult,
-        actionError,
-        actionPending,
-        contextActionResult,
-        contextActionError,
-        providerMessageId: sent?.messages?.[0]?.id || null,
-      },
-      timestamp: new Date(),
-    },
-  });
+  scheduleConversationProcessing(conversation.id);
 
   return {
     duplicated: false,
     conversationId: conversation.id,
-    supportCaseId: supportCase?.id || null,
     inboundMessageId: inbound.id,
-    userType,
-    reply,
+    scheduled: true,
+    debounceMs: Math.max(0, Number(config.support.replyDebounceMs || 8000)),
   };
 }
 
