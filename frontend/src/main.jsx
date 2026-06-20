@@ -183,7 +183,21 @@ function humanDate(value) {
 
   if (sameDay(date, today)) return "Hoy";
   if (sameDay(date, yesterday)) return "Ayer";
-  return date.toLocaleDateString();
+  return date.toLocaleDateString("es-PE", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  });
+}
+
+function dateKey(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "sin-fecha";
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
 }
 
 function formatJson(value) {
@@ -1003,12 +1017,13 @@ function SupportApp({ onBack }) {
 
   const groupedMessages = useMemo(() => {
     const output = [];
-    let lastDate = "";
+    let lastDateKey = "";
     for (const message of messages) {
+      const key = dateKey(message.timestamp);
       const label = humanDate(message.timestamp);
-      if (label !== lastDate) {
-        output.push({ separator: true, id: `sep-${label}`, label });
-        lastDate = label;
+      if (key !== lastDateKey) {
+        output.push({ separator: true, id: `sep-${key}-${output.length}`, label });
+        lastDateKey = key;
       }
       output.push(message);
     }
@@ -1300,7 +1315,7 @@ function SupportApp({ onBack }) {
                   groupedMessages.map((message) =>
                     message.separator ? (
                       <div className="date-separator" key={message.id}>
-                        {message.label}
+                        <span>{message.label}</span>
                       </div>
                     ) : (
                       <article

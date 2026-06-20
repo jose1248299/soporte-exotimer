@@ -642,15 +642,30 @@ button {
 }
 
 .date-separator {
-  width: fit-content;
-  margin: 4px auto 16px;
-  border: 1px solid #d7dee8;
-  border-radius: 999px;
-  padding: 5px 10px;
-  color: #64748b;
-  background: rgba(255, 255, 255, 0.9);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: min(520px, 88%);
+  margin: 8px auto 18px;
   font-size: 12px;
   font-weight: 800;
+  color: #64748b;
+}
+
+.date-separator::before,
+.date-separator::after {
+  content: "";
+  height: 1px;
+  flex: 1;
+  background: rgba(148, 163, 184, 0.45);
+}
+
+.date-separator span {
+  border: 1px solid #d7dee8;
+  border-radius: 999px;
+  padding: 5px 12px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.08);
 }
 
 .message {
