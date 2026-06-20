@@ -52,6 +52,16 @@ const ACTIONS = {
     risk: SAFE_WRITE,
     description: "Corrige el correo de una inscripcion encontrada y conserva el resto del documento.",
   },
+  EXOTIMER_UPDATE_INSCRIPTION_EVENT_CATEGORY: {
+    roles: ["ORGANIZER", "ATHLETE", "TIMER"],
+    risk: SAFE_WRITE,
+    description: "Corrige distancia, genero o categoria de una inscripcion encontrada y conserva el resto del documento.",
+  },
+  EXOTIMER_RESEND_INSCRIPTION_CONFIRMATION: {
+    roles: ["ORGANIZER", "ATHLETE", "TIMER"],
+    risk: SAFE_WRITE,
+    description: "Reenvia el correo de confirmacion de una inscripcion ya existente.",
+  },
   EXOTIMER_GET_RESULTS: {
     roles: ["TIMER", "ATHLETE"],
     risk: SAFE_READ,
@@ -194,6 +204,50 @@ function tokenize(value) {
   return normalizeText(value)
     .split(/[^a-z0-9]+/i)
     .filter((token) => token.length > 2);
+}
+
+function optionScore(option, query) {
+  const normalizedOption = normalizeText(option);
+  const normalizedQuery = normalizeText(query);
+  if (!normalizedOption || !normalizedQuery) return 0;
+  if (normalizedOption === normalizedQuery) return 100;
+  if (normalizedOption.includes(normalizedQuery) || normalizedQuery.includes(normalizedOption)) return 85;
+
+  const queryTokens = tokenize(query);
+  const optionTokens = new Set(tokenize(option));
+  if (!queryTokens.length) return 0;
+
+  const matched = queryTokens.filter((token) => optionTokens.has(token)).length;
+  return Math.round((matched / queryTokens.length) * 80);
+}
+
+function resolveOption(options, query, label, { minScore = 55 } = {}) {
+  const cleanQuery = clean(query);
+  if (!cleanQuery) return { value: null, score: 0, query: cleanQuery };
+  const candidates = [...new Set(options.filter(Boolean).map(String))]
+    .map((option) => ({ value: option, score: optionScore(option, cleanQuery) }))
+    .sort((a, b) => b.score - a.score);
+  const best = candidates[0];
+  if (!best || best.score < minScore) {
+    throw new Error(`No se encontro una opcion valida de ${label} para "${cleanQuery}".`);
+  }
+  const second = candidates[1];
+  if (second && second.score === best.score && normalizeText(second.value) !== normalizeText(best.value)) {
+    throw new Error(`La opcion de ${label} "${cleanQuery}" es ambigua.`);
+  }
+  return { ...best, query: cleanQuery };
+}
+
+function resolveGenderOption(query) {
+  if (!clean(query)) return { value: null, score: 0, query: "" };
+  const normalized = normalizeText(query);
+  if (["f", "fem", "femenino", "female", "mujer", "damas"].includes(normalized)) {
+    return { value: "Femenino", score: 100, query: clean(query) };
+  }
+  if (["m", "masc", "masculino", "male", "hombre", "varones"].includes(normalized)) {
+    return { value: "Masculino", score: 100, query: clean(query) };
+  }
+  return resolveOption(["Femenino", "Masculino"], query, "genero", { minScore: 70 });
 }
 
 function competitionScore(competition, query) {
@@ -548,11 +602,17 @@ function scoreInscription(inscription, terms) {
 function summarizeInscription(inscription = {}, terms = {}) {
   const document = pickInscriptionDocument(inscription);
   const participant = pickParticipant(inscription);
+  const ticket = inscription.ticket && typeof inscription.ticket === "object" ? inscription.ticket : null;
+  const event = inscription.event && typeof inscription.event === "object" ? inscription.event : null;
   const email = clean(document.email || participant.email);
   const expectedEmail = clean(terms.email);
   return {
     id: inscription.id || inscription.pk || null,
     participantId: participant.id || null,
+    participantUserFirebase:
+      clean(participant.user_firebase || participant.userFirebase || participant.user_uid || participant.uid) || null,
+    ticketId: ticket?.id || inscription.ticket_id || (typeof inscription.ticket === "number" ? inscription.ticket : null),
+    eventId: event?.id || inscription.event_id || (typeof inscription.event === "number" ? inscription.event : null),
     name: inscriptionFullName(inscription) || null,
     dni: clean(document.dni || document.document || participant.dni) || null,
     email: email || null,
@@ -696,6 +756,192 @@ async function updateInscriptionEmail(input = {}) {
       afterEmail: nextEmail,
     },
     saved: response,
+  };
+}
+
+async function getInscriptionCombineData(competitionId) {
+  const request = {
+    method: "GET",
+    path: `/api/competition/event/combine-data/${competitionId}/`,
+  };
+  const response = await apiRequest(request);
+  return {
+    ...buildAudit({ method: request.method, path: request.path, response }),
+    combinations: response && typeof response === "object" && !Array.isArray(response) ? response : {},
+  };
+}
+
+async function updateInscriptionEventCategory(input = {}) {
+  const lookup = await getInscriptionByReferenceOrDocument(input);
+  if (!lookup.found || !lookup.bestMatch) {
+    throw new Error(lookup.ambiguous ? "La busqueda de inscripcion es ambigua." : "No se encontro la inscripcion.");
+  }
+
+  const before = lookup.bestMatch;
+  const combineData = await getInscriptionCombineData(lookup.competitionId);
+  const combinations = combineData.combinations;
+  const distanceOptions = Object.keys(combinations);
+
+  const targetField = normalizeText(input.targetField || input.field || "");
+  const requestedValue = clean(input.requestedValue || input.newValue);
+  const requestedDistance = clean(
+    input.newDistance ||
+      input.distanceNew ||
+      input.distancia ||
+      input.distance ||
+      input.requestedDistance ||
+      (targetField.includes("distancia") || targetField.includes("distance") ? requestedValue : null)
+  );
+  const requestedGender = clean(
+    input.newGender ||
+      input.genderNew ||
+      input.genero ||
+      input.gender ||
+      input.requestedGender ||
+      (targetField.includes("genero") || targetField.includes("gender") ? requestedValue : null)
+  );
+  const requestedCategory = clean(
+    input.newCategory ||
+      input.categoryNew ||
+      input.categoria ||
+      input.category ||
+      input.requestedCategory ||
+      (targetField.includes("categoria") || targetField.includes("category") ? requestedValue : null)
+  );
+  if (!requestedDistance && !requestedGender && !requestedCategory) {
+    throw new Error("Falta distancia, genero o categoria para actualizar la inscripcion.");
+  }
+
+  const resolvedDistance = requestedDistance
+    ? resolveOption(distanceOptions, requestedDistance, "distancia")
+    : resolveOption(distanceOptions, before.distance, "distancia");
+  const categoryOptions = combinations[resolvedDistance.value] || [];
+  const resolvedCategory = requestedCategory
+    ? resolveOption(categoryOptions, requestedCategory, "categoria")
+    : resolveOption(categoryOptions, before.category, "categoria");
+  const resolvedGender = requestedGender ? resolveGenderOption(requestedGender) : { value: before.gender, score: 100 };
+
+  const document = {
+    ...(before.documentData || {}),
+    distancia: resolvedDistance.value,
+    genero: resolvedGender.value,
+    categoria: resolvedCategory.value,
+  };
+
+  const request = {
+    method: "POST",
+    path: "/api/inscription/update-admin/",
+    data: {
+      competition_id: String(lookup.competitionId),
+      pk: String(before.id),
+      document,
+    },
+  };
+  const response = await apiRequest(request);
+  const verification = await getInscriptionByReferenceOrDocument({
+    competitionId: lookup.competitionId,
+    inscriptionId: before.id,
+    document: before.dni,
+    dni: before.dni,
+    email: before.email,
+    phone: before.phone,
+    participantName: before.name,
+  });
+  const after = verification.bestMatch;
+  if (
+    !after ||
+    normalizeText(after.distance) !== normalizeText(resolvedDistance.value) ||
+    normalizeText(after.category) !== normalizeText(resolvedCategory.value) ||
+    normalizeText(after.gender) !== normalizeText(resolvedGender.value)
+  ) {
+    throw new Error("La inscripcion se guardo, pero la verificacion posterior no coincide con la combinacion solicitada.");
+  }
+
+  return {
+    ...buildAudit({ method: request.method, path: request.path, payload: request.data, response }),
+    combineData,
+    resolvedCombination: {
+      distance: resolvedDistance,
+      category: resolvedCategory,
+      gender: resolvedGender,
+    },
+    changed: {
+      competitionId: lookup.competitionId,
+      inscriptionId: before.id,
+      before: {
+        eventId: before.eventId,
+        distance: before.distance,
+        category: before.category,
+        gender: before.gender,
+      },
+      after: after
+        ? {
+            eventId: after.eventId,
+            distance: after.distance,
+            category: after.category,
+            gender: after.gender,
+          }
+        : null,
+    },
+    saved: response,
+    verification,
+  };
+}
+
+async function resolveParticipantUserFirebase(inscription) {
+  if (inscription.participantUserFirebase) {
+    return { userFirebase: inscription.participantUserFirebase, audit: null };
+  }
+  if (!inscription.participantId) return { userFirebase: null, audit: null };
+
+  const request = { path: `/v3/participants/${inscription.participantId}/` };
+  const response = await apiRequest(request);
+  return {
+    userFirebase: clean(response?.participant?.user_firebase || response?.user_firebase) || null,
+    audit: buildAudit({ path: request.path, response }),
+  };
+}
+
+async function resendInscriptionConfirmation(input = {}) {
+  const lookup = await getInscriptionByReferenceOrDocument(input);
+  if (!lookup.found || !lookup.bestMatch) {
+    throw new Error(lookup.ambiguous ? "La busqueda de inscripcion es ambigua." : "No se encontro la inscripcion.");
+  }
+
+  const match = lookup.bestMatch;
+  const participantResolution = await resolveParticipantUserFirebase(match);
+  const userFirebase = participantResolution.userFirebase;
+  if (!match.ticketId || !match.eventId || !userFirebase) {
+    throw new Error("No se pudo resolver ticket, evento o user_firebase para reenviar la confirmacion.");
+  }
+
+  const payload = {
+    ticket: match.ticketId,
+    participant: userFirebase,
+    event: match.eventId,
+    document: JSON.stringify(match.documentData || {}),
+  };
+  const request = {
+    method: "POST",
+    path: "/api/inscription/create/",
+    data: payload,
+  };
+  const response = await apiRequest(request);
+
+  return {
+    ...buildAudit({ method: request.method, path: request.path, payload, response }),
+    resent: true,
+    inscription: {
+      id: match.id,
+      competitionId: lookup.competitionId,
+      participantId: match.participantId,
+      ticketId: match.ticketId,
+      eventId: match.eventId,
+      email: match.email,
+      name: match.name,
+    },
+    lookup,
+    participantResolution: participantResolution.audit,
   };
 }
 
@@ -1396,6 +1642,8 @@ const HANDLERS = {
   EXOTIMER_GET_INSCRIPTION_BY_REFERENCE_OR_DOCUMENT: getInscriptionByReferenceOrDocument,
   EXOTIMER_VALIDATE_PAYMENT_EVIDENCE: validatePaymentEvidence,
   EXOTIMER_UPDATE_INSCRIPTION_EMAIL: updateInscriptionEmail,
+  EXOTIMER_UPDATE_INSCRIPTION_EVENT_CATEGORY: updateInscriptionEventCategory,
+  EXOTIMER_RESEND_INSCRIPTION_CONFIRMATION: resendInscriptionConfirmation,
   EXOTIMER_GET_RESULTS: getResults,
   EXOTIMER_GET_RESULT_DETAIL: getResultDetail,
   EXOTIMER_CREATE_RESULT_CORRECTION_CASE: createResultCorrectionCase,

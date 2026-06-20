@@ -85,6 +85,8 @@ function actionNeedsCompetitionId(actionName) {
     "EXOTIMER_GET_INSCRIPTION_BY_REFERENCE_OR_DOCUMENT",
     "EXOTIMER_VALIDATE_PAYMENT_EVIDENCE",
     "EXOTIMER_UPDATE_INSCRIPTION_EMAIL",
+    "EXOTIMER_UPDATE_INSCRIPTION_EVENT_CATEGORY",
+    "EXOTIMER_RESEND_INSCRIPTION_CONFIRMATION",
     "EXOTIMER_GET_RESULTS",
     "EXOTIMER_UPDATE_RESULT_PARTICIPANT_DATA",
     "EXOTIMER_UPDATE_RESULT_DORSAL",
@@ -164,9 +166,13 @@ function missingFieldsForAction(actionName, input = {}) {
   }
 
   if (
-    ["EXOTIMER_GET_INSCRIPTION_BY_REFERENCE_OR_DOCUMENT", "EXOTIMER_VALIDATE_PAYMENT_EVIDENCE", "EXOTIMER_UPDATE_INSCRIPTION_EMAIL"].includes(
-      actionName
-    )
+    [
+      "EXOTIMER_GET_INSCRIPTION_BY_REFERENCE_OR_DOCUMENT",
+      "EXOTIMER_VALIDATE_PAYMENT_EVIDENCE",
+      "EXOTIMER_UPDATE_INSCRIPTION_EMAIL",
+      "EXOTIMER_UPDATE_INSCRIPTION_EVENT_CATEGORY",
+      "EXOTIMER_RESEND_INSCRIPTION_CONFIRMATION",
+    ].includes(actionName)
   ) {
     const hasLookupReference = Boolean(
       input.inscriptionId ||
@@ -195,6 +201,26 @@ function missingFieldsForAction(actionName, input = {}) {
     if (actionName === "EXOTIMER_UPDATE_INSCRIPTION_EMAIL") {
       const hasNewEmail = Boolean(input.newEmail || input.correctEmail || input.requestedEmail || input.email);
       if (!hasNewEmail) missing.push("newEmail");
+    }
+
+    if (actionName === "EXOTIMER_UPDATE_INSCRIPTION_EVENT_CATEGORY") {
+      const hasInscriptionEventPatch = Boolean(
+        input.newDistance ||
+          input.distanceNew ||
+          input.distancia ||
+          input.requestedDistance ||
+          input.newGender ||
+          input.genderNew ||
+          input.genero ||
+          input.requestedGender ||
+          input.newCategory ||
+          input.categoryNew ||
+          input.categoria ||
+          input.requestedCategory ||
+          input.requestedValue ||
+          input.newValue
+      );
+      if (!hasInscriptionEventPatch) missing.push("distance_gender_or_category");
     }
   }
 
