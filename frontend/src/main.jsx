@@ -1015,6 +1015,21 @@ function SupportApp({ onBack }) {
     });
   }, [conversations, query, typeFilter]);
 
+  const groupedConversations = useMemo(() => {
+    const output = [];
+    let lastDateKey = "";
+    for (const conversation of filtered) {
+      const key = dateKey(conversation.lastTimestamp);
+      const label = humanDate(conversation.lastTimestamp);
+      if (key !== lastDateKey) {
+        output.push({ separator: true, id: `conversation-sep-${key}-${output.length}`, label });
+        lastDateKey = key;
+      }
+      output.push(conversation);
+    }
+    return output;
+  }, [filtered]);
+
   const groupedMessages = useMemo(() => {
     const output = [];
     let lastDateKey = "";
@@ -1247,28 +1262,34 @@ function SupportApp({ onBack }) {
           </div>
 
           <div className="conversation-list">
-            {filtered.map((item) => (
-              <button
-                key={item.id}
-                className={`conversation-item ${selected?.id === item.id ? "selected" : ""}`}
-                onClick={() => setSelected(item)}
-              >
-                <span className={`avatar ${item.userType.toLowerCase()}`}>
-                  {initials(item.name)}
-                </span>
-                <span className="conversation-copy">
-                  <span className="conversation-title">
-                    <strong>{item.name}</strong>
-                    <time>{item.lastTimestamp ? humanTime(item.lastTimestamp) : ""}</time>
+            {groupedConversations.map((item) =>
+              item.separator ? (
+                <div className="conversation-date-separator" key={item.id}>
+                  <span>{item.label}</span>
+                </div>
+              ) : (
+                <button
+                  key={item.id}
+                  className={`conversation-item ${selected?.id === item.id ? "selected" : ""}`}
+                  onClick={() => setSelected(item)}
+                >
+                  <span className={`avatar ${item.userType.toLowerCase()}`}>
+                    {initials(item.name)}
                   </span>
-                  <span className="conversation-subtitle">{item.lastMessage}</span>
-                  <span className="conversation-meta">
-                    <span>{USER_LABELS[item.userType] || "Cliente"}</span>
-                    {item.status === "WAITING_HUMAN" && <span>Atencion humana</span>}
+                  <span className="conversation-copy">
+                    <span className="conversation-title">
+                      <strong>{item.name}</strong>
+                      <time>{item.lastTimestamp ? humanTime(item.lastTimestamp) : ""}</time>
+                    </span>
+                    <span className="conversation-subtitle">{item.lastMessage}</span>
+                    <span className="conversation-meta">
+                      <span>{USER_LABELS[item.userType] || "Cliente"}</span>
+                      {item.status === "WAITING_HUMAN" && <span>Atencion humana</span>}
+                    </span>
                   </span>
-                </span>
-              </button>
-            ))}
+                </button>
+              )
+            )}
           </div>
         </aside>
 
