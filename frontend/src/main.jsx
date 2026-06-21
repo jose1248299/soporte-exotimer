@@ -29,6 +29,7 @@ import { apiBlobUrl, apiFetch, setAuthTokenProvider } from "./utils/api.js";
 import "./styles.css";
 
 const USER_LABELS = {
+  SYSTEM_USER: "Usuario sistema",
   TIMER: "Timer",
   BUYER: "Comprador",
   ORGANIZER: "Organizador",
@@ -36,7 +37,7 @@ const USER_LABELS = {
   UNKNOWN: "Sin clasificar",
 };
 
-const USER_TYPES = ["TIMER", "ORGANIZER", "ATHLETE", "BUYER", "UNKNOWN"];
+const USER_TYPES = ["SYSTEM_USER", "TIMER", "ORGANIZER", "ATHLETE", "BUYER", "UNKNOWN"];
 
 function urlBase64ToUint8Array(base64String) {
   const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
@@ -1250,7 +1251,7 @@ function SupportApp({ onBack }) {
           </div>
 
           <div className="type-tabs">
-            {["ALL", "TIMER", "BUYER", "ORGANIZER", "ATHLETE"].map((type) => (
+            {["ALL", "SYSTEM_USER", "TIMER", "BUYER", "ORGANIZER", "ATHLETE"].map((type) => (
               <button
                 key={type}
                 className={typeFilter === type ? "active" : ""}
@@ -1398,7 +1399,7 @@ function SupportApp({ onBack }) {
               </button>
             </header>
             <div className="filter-options">
-              {["ALL", "TIMER", "BUYER", "ORGANIZER", "ATHLETE"].map((type) => (
+              {["ALL", "SYSTEM_USER", "TIMER", "BUYER", "ORGANIZER", "ATHLETE"].map((type) => (
                 <button
                   key={type}
                   className={typeFilter === type ? "active" : ""}

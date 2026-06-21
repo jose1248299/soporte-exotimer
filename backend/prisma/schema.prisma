@@ -8,6 +8,7 @@ datasource db {
 }
 
 enum UserType {
+  SYSTEM_USER
   TIMER
   BUYER
   ORGANIZER
@@ -22,6 +23,7 @@ enum MessageDirection {
 
 enum MessageChannel {
   WHATSAPP
+  EXOTIMER
 }
 
 enum MessageContentType {

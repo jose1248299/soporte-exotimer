@@ -1,7 +1,7 @@
 const prisma = require("../lib/prisma");
 const { ACTIONS, requiresConfirmation, canExecuteAction } = require("./exotimerClient");
 
-const USER_TYPES = ["TIMER", "BUYER", "ORGANIZER", "ATHLETE", "UNKNOWN"];
+const USER_TYPES = ["SYSTEM_USER", "TIMER", "BUYER", "ORGANIZER", "ATHLETE", "UNKNOWN"];
 const MISSING_DATABASE_ERROR =
   "DATABASE_URL no esta configurado. Conecta PostgreSQL para guardar cambios de permisos.";
 
@@ -14,11 +14,12 @@ function allowDefaultPoliciesWithoutDatabase() {
 }
 
 function buildDefaultPolicy(userType, actionName) {
+  const isSystemUser = userType === "SYSTEM_USER";
   return {
     userType,
     actionName,
-    enabled: canExecuteAction(userType, actionName),
-    requiresHuman: requiresConfirmation(actionName),
+    enabled: isSystemUser ? true : canExecuteAction(userType, actionName),
+    requiresHuman: isSystemUser ? false : requiresConfirmation(actionName),
     source: "default",
     action: ACTIONS[actionName],
   };

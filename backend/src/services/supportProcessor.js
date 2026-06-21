@@ -12,19 +12,59 @@ const { normalizePhone } = require("../utils/phone");
 const replyDebounceTimers = new Map();
 const processorStartedAt = new Date();
 
-async function findOrCreateConversation({ phone, displayName }) {
-  return prisma.conversation.upsert({
-    where: { channel_phone: { channel: "WHATSAPP", phone } },
-    create: {
-      phone,
-      displayName,
-      lastMessageAt: new Date(),
-    },
-    update: {
+async function findOrCreateConversation({ phone, displayName, channel = "WHATSAPP", userType, touchLastMessageAt = true }) {
+  const existing = await prisma.conversation.findUnique({
+    where: { channel_phone: { channel, phone } },
+  });
+
+  if (!existing) {
+    return prisma.conversation.create({
+      data: {
+        channel,
+        phone,
+        displayName,
+        userType: userType || undefined,
+        lastMessageAt: new Date(),
+      },
+    });
+  }
+
+  return prisma.conversation.update({
+    where: { id: existing.id },
+    data: {
       displayName: displayName || undefined,
-      lastMessageAt: new Date(),
+      userType:
+        channel === "EXOTIMER" && userType === "SYSTEM_USER"
+          ? "SYSTEM_USER"
+          : existing.userType === "UNKNOWN" && userType
+            ? userType
+            : undefined,
+      lastMessageAt: touchLastMessageAt ? new Date() : undefined,
     },
   });
+}
+
+function buildExotimerContextText(message, conversation) {
+  if (!message || conversation?.channel !== "EXOTIMER") return "";
+  const context = message.rawPayload?.context || {};
+  const items = [
+    message.competitionId ? `competitionId=${message.competitionId}` : "",
+    context.page ? `page=${context.page}` : "",
+    context.section ? `section=${context.section}` : "",
+  ].filter(Boolean);
+
+  return items.length ? `Contexto ExoTimer: ${items.join(", ")}.` : "";
+}
+
+function buildExotimerConversationPhone({ competitionId, userId }) {
+  return `exotimer:${competitionId}:${String(userId || "unknown").trim() || "unknown"}`;
+}
+
+function normalizeExotimerUserType(userRole) {
+  const role = String(userRole || "").toUpperCase();
+  if (role === "SYSTEM_USER") return "SYSTEM_USER";
+  if (["ADMIN", "SUPER_ADMIN", "STAFF", "ORGANIZER", "TIMER"].includes(role)) return "SYSTEM_USER";
+  return "SYSTEM_USER";
 }
 
 function compactMessage(message) {
@@ -397,9 +437,15 @@ async function processConversationReply(conversationId) {
   });
   if (!conversation) return null;
 
-  const timer = await prisma.timerContact.findFirst({
-    where: { phone: conversation.phone, active: true },
-  });
+  const isWhatsapp = conversation.channel === "WHATSAPP";
+  const isExotimer = conversation.channel === "EXOTIMER";
+  const trustedSystemUser = isExotimer;
+
+  const timer = isWhatsapp
+    ? await prisma.timerContact.findFirst({
+        where: { phone: conversation.phone, active: true },
+      })
+    : null;
 
   const pendingInboundMessages = await findPendingInboundMessages(conversation.id);
   if (!pendingInboundMessages.length) return null;
@@ -410,8 +456,9 @@ async function processConversationReply(conversationId) {
     take: 12,
   });
   const history = [...recentMessages].reverse().map(compactMessage);
-  const processableText = buildCombinedProcessableText(pendingInboundMessages);
   const triggerMessage = pendingInboundMessages[pendingInboundMessages.length - 1];
+  const contextText = buildExotimerContextText(triggerMessage, conversation);
+  const processableText = [contextText, buildCombinedProcessableText(pendingInboundMessages)].filter(Boolean).join("\n\n");
 
   let classification = await classifyMessage({
     text: processableText,
@@ -420,14 +467,23 @@ async function processConversationReply(conversationId) {
     previousUserType: conversation.userType,
     conversationStatus: conversation.status,
     history,
+    channel: conversation.channel,
+    trustedSystemUser,
   });
   classification = mergeClassificationWithConversation(classification, conversation);
+  if (trustedSystemUser) {
+    classification = {
+      ...classification,
+      userType: "SYSTEM_USER",
+      confidence: Math.max(classification.confidence || 0, 0.95),
+    };
+  }
   classification = {
     ...classification,
     actionInput: normalizeDorsalReferences(classification.actionInput || {}),
   };
 
-  const userType = timer ? "TIMER" : classification.userType;
+  const userType = trustedSystemUser ? "SYSTEM_USER" : timer ? "TIMER" : classification.userType;
   const contextResolution = await resolveCompetitionForAction(userType, classification);
   classification = contextResolution.classification;
 
@@ -469,7 +525,7 @@ async function processConversationReply(conversationId) {
     classification,
     timestamp: triggerMessage.timestamp,
   });
-  const competitionId = supportCase?.competitionId || pickCompetitionId(classification.actionInput);
+  const competitionId = supportCase?.competitionId || pickCompetitionId(classification.actionInput) || (isExotimer ? triggerMessage.competitionId : null);
 
   if (supportCase || competitionId) {
     await prisma.message.updateMany({
@@ -535,12 +591,12 @@ async function processConversationReply(conversationId) {
 
     const actionInput = {
       ...classification.actionInput,
-      source: "whatsapp",
+      source: isExotimer ? "exotimer" : "whatsapp",
       phone: conversation.phone,
       message: processableText,
     };
 
-    if (!policy.enabled) {
+    if (!trustedSystemUser && !policy.enabled) {
       actionPending = {
         actionId: action.id,
         action: classification.action,
@@ -554,7 +610,7 @@ async function processConversationReply(conversationId) {
         where: { id: conversation.id },
         data: { status: "WAITING_HUMAN" },
       });
-    } else if ((policy.requiresHuman || requiresConfirmation(classification.action)) && !classification.actionInput?.confirmed) {
+    } else if (!trustedSystemUser && (policy.requiresHuman || requiresConfirmation(classification.action)) && !classification.actionInput?.confirmed) {
       actionPending = {
         actionId: action.id,
         action: classification.action,
@@ -594,13 +650,16 @@ async function processConversationReply(conversationId) {
     contextActionResult,
     contextActionError,
     history,
+    channel: conversation.channel,
   });
 
   let sent = null;
-  try {
-    sent = await sendTextMessage(conversation.phone, reply);
-  } catch (error) {
-    console.error("No se pudo enviar respuesta WhatsApp:", error.response?.data || error.message);
+  if (isWhatsapp) {
+    try {
+      sent = await sendTextMessage(conversation.phone, reply);
+    } catch (error) {
+      console.error("No se pudo enviar respuesta WhatsApp:", error.response?.data || error.message);
+    }
   }
 
   await prisma.message.create({
@@ -618,6 +677,7 @@ async function processConversationReply(conversationId) {
         actionPending,
         contextActionResult,
         contextActionError,
+        source: isExotimer ? "exotimer" : "whatsapp",
         providerMessageId: sent?.messages?.[0]?.id || null,
       },
       timestamp: new Date(),
@@ -733,4 +793,88 @@ async function processInboundMessage({ waId, from, text = "", timestamp, rawPayl
   };
 }
 
-module.exports = { processInboundMessage, processInboundText };
+async function findOrCreateExotimerConversation({ competitionId, userId, userName, userRole, touchLastMessageAt = true }) {
+  const normalizedCompetitionId = Number(competitionId);
+  if (!Number.isInteger(normalizedCompetitionId)) throw new Error("competitionId invalido");
+  if (!userId) throw new Error("userId requerido");
+
+  const phone = buildExotimerConversationPhone({ competitionId: normalizedCompetitionId, userId });
+  return findOrCreateConversation({
+    channel: "EXOTIMER",
+    phone,
+    displayName: userName || `Usuario ExoTimer ${userId}`,
+    userType: normalizeExotimerUserType(userRole),
+    touchLastMessageAt,
+  });
+}
+
+async function processInboundExotimerMessage({
+  competitionId,
+  userId,
+  userName,
+  userRole,
+  text = "",
+  context,
+  timestamp = new Date(),
+}) {
+  const content = String(text || "").trim();
+  if (!content) throw new Error("Mensaje requerido");
+
+  const normalizedCompetitionId = Number(competitionId);
+  if (!Number.isInteger(normalizedCompetitionId)) throw new Error("competitionId invalido");
+
+  const conversation = await findOrCreateExotimerConversation({
+    competitionId: normalizedCompetitionId,
+    userId,
+    userName,
+    userRole,
+  });
+
+  const inbound = await prisma.message.create({
+    data: {
+      conversationId: conversation.id,
+      competitionId: normalizedCompetitionId,
+      direction: "INBOUND",
+      contentType: "TEXT",
+      phone: conversation.phone,
+      content,
+      rawPayload: {
+        source: "exotimer",
+        competitionId: normalizedCompetitionId,
+        userId: String(userId),
+        userName: userName || null,
+        userRole: userRole || null,
+        context: context || null,
+      },
+      aiMetadata: {
+        source: "exotimer",
+        page: context?.page || null,
+        section: context?.section || null,
+      },
+      timestamp,
+    },
+  });
+
+  await prisma.conversation.update({
+    where: { id: conversation.id },
+    data: { lastMessageAt: inbound.timestamp },
+  });
+
+  scheduleConversationProcessing(conversation.id);
+
+  return {
+    duplicated: false,
+    conversationId: conversation.id,
+    inboundMessageId: inbound.id,
+    scheduled: true,
+    debounceMs: Math.max(0, Number(config.support.replyDebounceMs || 8000)),
+  };
+}
+
+module.exports = {
+  buildExotimerConversationPhone,
+  findOrCreateExotimerConversation,
+  processInboundExotimerMessage,
+  processInboundMessage,
+  processInboundText,
+};

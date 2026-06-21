@@ -2,6 +2,7 @@ const OpenAI = require("openai");
 const { z } = require("zod");
 const config = require("../config");
 const { ACTIONS, canExecuteAction, requiresConfirmation } = require("./exotimerClient");
+const { buildExotimerAssistantKnowledge } = require("./exotimerKnowledge");
 
 const actionNames = Object.keys(ACTIONS);
 
@@ -16,7 +17,7 @@ const fallbackClassification = {
 };
 
 const classificationSchema = z.object({
-  userType: z.enum(["TIMER", "BUYER", "ORGANIZER", "ATHLETE", "UNKNOWN"]),
+  userType: z.enum(["SYSTEM_USER", "TIMER", "BUYER", "ORGANIZER", "ATHLETE", "UNKNOWN"]),
   confidence: z.number().min(0).max(1),
   intent: z.string(),
   summary: z.string(),
@@ -114,16 +115,26 @@ function heuristicClassify(text, forcedTimer) {
   return fallbackClassification;
 }
 
-async function classifyMessage({ text, forcedTimer, previousClassification, previousUserType, conversationStatus, history = [] }) {
+async function classifyMessage({
+  text,
+  forcedTimer,
+  previousClassification,
+  previousUserType,
+  conversationStatus,
+  history = [],
+  channel = "WHATSAPP",
+  trustedSystemUser = false,
+}) {
   if (forcedTimer) return heuristicClassify(text, true);
 
   const client = getClient();
   if (!client) return heuristicClassify(text, false);
 
   const prompt = [
-    "Clasifica un mensaje entrante de WhatsApp para Finisher Data, empresa de cronometraje electronico deportivo.",
+    `Clasifica un mensaje entrante por ${channel === "EXOTIMER" ? "el chat interno de ExoTimer" : "WhatsApp"} para Finisher Data, empresa de cronometraje electronico deportivo.`,
     "Debes razonar como una conversacion completa, no como mensajes aislados.",
     "Tipos de usuario:",
+    "- SYSTEM_USER: usuario autenticado dentro de ExoTimer. Solo usar si el canal/contexto indica trustedSystemUser=true.",
     "- TIMER: solo si el sistema ya lo identifico por telefono. No asumas TIMER por texto.",
     "- BUYER: solicita precios, cotizaciones o informacion comercial.",
     "- ORGANIZER: organiza un evento y pide modificar tickets, inscripciones o configuracion de venta.",
@@ -135,6 +146,15 @@ async function classifyMessage({ text, forcedTimer, previousClassification, prev
         `- ${name}: ${meta.description}. Roles: ${meta.roles.join(", ")}. Riesgo: ${meta.risk}.`
     ),
     "Reglas:",
+    trustedSystemUser
+      ? "- Este mensaje viene del chat interno de ExoTimer con trustedSystemUser=true. Clasifica userType=SYSTEM_USER. Puede ejecutar cualquier accion disponible si hay datos suficientes. No lo trates como atleta externo."
+      : "- Este mensaje viene de un canal externo. No uses SYSTEM_USER.",
+    trustedSystemUser
+      ? "- Para SYSTEM_USER, usa action=null cuando la consulta sea explicativa o de manual, por ejemplo como usar una pantalla, que significa un error o donde configurar algo. Responde con informacion usando el contexto operativo."
+      : "",
+    trustedSystemUser
+      ? "- Para SYSTEM_USER, si pide explicitamente crear, editar, corregir, reenviar, validar o consultar datos, devuelve la accion ExoTimer mas concreta y needsHuman=false cuando tengas identificadores suficientes."
+      : "",
     "- Usa el historial y la clasificacion anterior para entender mensajes cortos de continuidad como nombres, dorsales, confirmaciones o aclaraciones.",
     "- Si el mensaje actual completa datos pedidos antes, conserva el userType, intent, action y actionInput anterior, agregando solo los datos nuevos.",
     "- No cambies a UNKNOWN si el historial muestra claramente que la conversacion sigue siendo sobre el mismo caso.",
@@ -167,11 +187,14 @@ async function classifyMessage({ text, forcedTimer, previousClassification, prev
     "- Para compradores, usa BUYER_CREATE_PRICE_INQUIRY; la cotizacion comercial vive fuera de Exotimer.",
     "Contexto persistente:",
     JSON.stringify({
+      channel,
+      trustedSystemUser,
       previousUserType,
       conversationStatus,
       previousClassification,
       history,
     }),
+    trustedSystemUser ? buildExotimerAssistantKnowledge() : "",
     `Mensaje actual: ${text}`,
   ].join("\n");
 
@@ -192,7 +215,7 @@ async function classifyMessage({ text, forcedTimer, previousClassification, prev
     data.needsHuman = true;
   }
 
-  if (data.action && requiresConfirmation(data.action)) {
+  if (data.action && requiresConfirmation(data.action) && data.userType !== "SYSTEM_USER") {
     data.needsHuman = true;
   }
 
@@ -225,6 +248,7 @@ async function composeReply({
   contextActionResult,
   contextActionError,
   history = [],
+  channel = "WHATSAPP",
 }) {
   const client = getClient();
   if (!client) return fallbackReply(userType);
@@ -244,7 +268,17 @@ async function composeReply({
       {
         role: "system",
         content:
-          "Eres soporte de Finisher Data por WhatsApp. Responde en espanol, breve, amable y accionable. Usa el historial para continuar el caso sin pedir de nuevo datos ya entregados. No inventes cambios realizados. Si falta informacion, pidela claramente. Si algo quedo pendiente de confirmacion humana, dilo sin afirmar que ya se cambio.",
+          [
+            `Eres soporte de Finisher Data por ${channel === "EXOTIMER" ? "el chat interno de ExoTimer para usuarios autenticados del sistema" : "WhatsApp"}.`,
+            "Responde en espanol, breve, amable y accionable. Usa el historial para continuar el caso sin pedir de nuevo datos ya entregados.",
+            "No inventes cambios realizados. Si falta informacion, pidela claramente. Si algo quedo pendiente de confirmacion humana, dilo sin afirmar que ya se cambio.",
+            channel === "EXOTIMER"
+              ? "Si la consulta es informativa, responde como asistente operativo usando el manual y contexto de ExoTimer. Si se ejecuto una accion, resume que se hizo y que debe revisar el usuario."
+              : "",
+            channel === "EXOTIMER" ? buildExotimerAssistantKnowledge() : "",
+          ]
+            .filter(Boolean)
+            .join("\n"),
       },
       {
         role: "user",

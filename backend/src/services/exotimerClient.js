@@ -174,6 +174,7 @@ async function getAccessToken() {
 
 function canExecuteAction(userType, actionName) {
   const action = ACTIONS[actionName];
+  if (action && userType === "SYSTEM_USER") return true;
   return Boolean(action && action.roles.includes(userType));
 }
 

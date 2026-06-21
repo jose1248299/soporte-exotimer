@@ -1,6 +1,10 @@
 const express = require("express");
 const prisma = require("../lib/prisma");
 const { sendTextMessage } = require("../services/waba");
+const {
+  findOrCreateExotimerConversation,
+  processInboundExotimerMessage,
+} = require("../services/supportProcessor");
 
 const router = express.Router();
 
@@ -28,6 +32,69 @@ function parseId(value) {
   const id = Number(value);
   return Number.isInteger(id) ? id : null;
 }
+
+function readUserContext(req) {
+  const userId = String(req.query.userId || req.body?.userId || "").trim();
+  const userName = String(req.query.userName || req.body?.userName || "").trim();
+  const userRole = String(req.query.userRole || req.body?.userRole || "").trim();
+  return { userId, userName, userRole };
+}
+
+router.get("/competitions/:competitionId/assistant/conversation", async (req, res) => {
+  const competitionId = parseId(req.params.competitionId);
+  const { userId, userName, userRole } = readUserContext(req);
+  if (!competitionId) return res.status(400).json({ error: "competitionId invalido" });
+  if (!userId) return res.status(400).json({ error: "userId requerido" });
+
+  const conversation = await findOrCreateExotimerConversation({
+    competitionId,
+    userId,
+    userName,
+    userRole,
+    touchLastMessageAt: false,
+  });
+
+  const detail = await prisma.conversation.findUnique({
+    where: { id: conversation.id },
+    include: {
+      messages: {
+        where: { competitionId },
+        orderBy: { timestamp: "asc" },
+        select: messageSelect,
+      },
+      actions: {
+        orderBy: { createdAt: "desc" },
+        take: 20,
+      },
+    },
+  });
+
+  res.json(detail);
+});
+
+router.post("/competitions/:competitionId/assistant/messages", async (req, res) => {
+  const competitionId = parseId(req.params.competitionId);
+  const { userId, userName, userRole } = readUserContext(req);
+  const content = String(req.body?.content || "").trim();
+  if (!competitionId) return res.status(400).json({ error: "competitionId invalido" });
+  if (!userId) return res.status(400).json({ error: "userId requerido" });
+  if (!content) return res.status(400).json({ error: "Mensaje requerido" });
+
+  try {
+    const result = await processInboundExotimerMessage({
+      competitionId,
+      userId,
+      userName,
+      userRole,
+      text: content,
+      context: req.body?.context || null,
+    });
+
+    res.status(201).json(result);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
 
 router.get("/competitions/:competitionId/support-cases", async (req, res) => {
   const competitionId = parseId(req.params.competitionId);
