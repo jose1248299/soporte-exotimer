@@ -225,6 +225,61 @@ function normalizeConversation(item) {
   };
 }
 
+function parseExotimerPhone(phone = "") {
+  const match = String(phone).match(/^exotimer:(\d+):(.+)$/);
+  if (!match) return null;
+  return { competitionId: match[1], userId: match[2] };
+}
+
+function groupInboxConversations(items) {
+  const grouped = new Map();
+  const output = [];
+
+  for (const item of items) {
+    const parsed = item.channel === "EXOTIMER" ? parseExotimerPhone(item.phone) : null;
+    if (!parsed) {
+      output.push(item);
+      continue;
+    }
+
+    const key = `exotimer-user:${parsed.userId}`;
+    const current = grouped.get(key);
+    const competitionIds = current?.competitionIds || [];
+    const nextCompetitionIds = competitionIds.includes(parsed.competitionId)
+      ? competitionIds
+      : [...competitionIds, parsed.competitionId];
+    const conversationIds = current?.conversationIds || [];
+    const nextConversationIds = conversationIds.includes(item.id)
+      ? conversationIds
+      : [...conversationIds, item.id];
+    const latest = !current || new Date(item.lastTimestamp || 0) > new Date(current.lastTimestamp || 0)
+      ? item
+      : current.latestConversation;
+
+    grouped.set(key, {
+      ...(latest || item),
+      id: key,
+      sourceId: latest?.id || item.id,
+      isAggregate: true,
+      channel: "EXOTIMER",
+      userType: "SYSTEM_USER",
+      name: item.name || current?.name || `Usuario ${parsed.userId}`,
+      phone: `ExoTimer · Usuario ${parsed.userId}`,
+      lastMessage: latest?.lastMessage || item.lastMessage,
+      lastTimestamp: latest?.lastTimestamp || item.lastTimestamp,
+      status: latest?.status || item.status,
+      conversationIds: nextConversationIds,
+      competitionIds: nextCompetitionIds.sort((a, b) => Number(a) - Number(b)),
+      latestConversation: latest || item,
+    });
+  }
+
+  return [
+    ...output,
+    ...Array.from(grouped.values()).map(({ latestConversation, ...item }) => item),
+  ].sort((a, b) => new Date(b.lastTimestamp || 0) - new Date(a.lastTimestamp || 0));
+}
+
 function actionStatusLabel(status) {
   const labels = {
     EXECUTED: "Ejecutada",
@@ -890,7 +945,7 @@ function SupportApp({ onBack }) {
         return res.json();
       })
       .then((data) => {
-        const normalized = Array.isArray(data) ? data.map(normalizeConversation) : [];
+        const normalized = Array.isArray(data) ? groupInboxConversations(data.map(normalizeConversation)) : [];
         setConversations(normalized);
         setUsingDemo(false);
         if (!normalized.length) setMessages([]);
@@ -898,7 +953,10 @@ function SupportApp({ onBack }) {
           if (!normalized.length) return null;
           if (!current) return isMobileLayout() || listLoaded.current ? null : normalized[0];
           if (String(current.id).startsWith("demo-")) return normalized[0];
-          return normalized.find((item) => item.id === current.id) || normalized[0];
+          return normalized.find((item) => {
+            if (item.id === current.id) return true;
+            return item.conversationIds?.includes(current.id) || item.sourceId === current.id;
+          }) || normalized[0];
         });
         listLoaded.current = true;
       })
@@ -959,6 +1017,36 @@ function SupportApp({ onBack }) {
       return;
     }
 
+    if (conversation.isAggregate && Array.isArray(conversation.conversationIds)) {
+      return Promise.all(
+        conversation.conversationIds.map((id) =>
+          apiFetch(`/api/conversations/${id}`, { timeoutMs: 10000 }).then((res) => {
+            if (!res.ok) throw new Error("No se pudo cargar conversacion");
+            return res.json();
+          })
+        )
+      )
+        .then((details) => {
+          const mergedMessages = details
+            .flatMap((detail) => Array.isArray(detail.messages) ? detail.messages : [])
+            .sort((a, b) => new Date(a.timestamp || 0) - new Date(b.timestamp || 0));
+          const mergedActions = details
+            .flatMap((detail) => Array.isArray(detail.actions) ? detail.actions : [])
+            .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+          setMessages(mergedMessages);
+          setConversationActions(mergedActions);
+        })
+        .catch(() => {
+          if (!silent) {
+            setMessages([]);
+            setConversationActions([]);
+          }
+        })
+        .finally(() => {
+          if (!silent) setLoadingChat(false);
+        });
+    }
+
     return apiFetch(`/api/conversations/${conversation.id}`, { timeoutMs: 10000 })
       .then((res) => {
         if (!res.ok) throw new Error("No se pudo cargar conversacion");
@@ -988,7 +1076,7 @@ function SupportApp({ onBack }) {
     return () => {
       window.clearInterval(interval);
     };
-  }, [loadMessages, selected?.id]);
+  }, [loadMessages, selected?.id, selected?.conversationIds?.join(",")]);
 
   useEffect(() => {
     const node = chatRef.current;
@@ -1049,6 +1137,7 @@ function SupportApp({ onBack }) {
   async function handleSend() {
     const content = draft.trim();
     if (!content || !selected) return;
+    if (selected.isAggregate) return;
 
     setSending(true);
     setDraft("");
@@ -1285,6 +1374,7 @@ function SupportApp({ onBack }) {
                     <span className="conversation-subtitle">{item.lastMessage}</span>
                     <span className="conversation-meta">
                       <span>{USER_LABELS[item.userType] || "Cliente"}</span>
+                      {item.isAggregate && <span>{item.competitionIds.length} competencias</span>}
                       {item.status === "WAITING_HUMAN" && <span>Atencion humana</span>}
                     </span>
                   </span>
@@ -1312,7 +1402,12 @@ function SupportApp({ onBack }) {
                 </span>
                 <div>
                   <h2>{selected.name}</h2>
-                  <p>{selected.phone} · {USER_LABELS[selected.userType]}</p>
+                  <p>
+                    {selected.phone} - {USER_LABELS[selected.userType]}
+                    {selected.isAggregate && selected.competitionIds?.length
+                      ? ` - Competencias ${selected.competitionIds.join(", ")}`
+                      : ""}
+                  </p>
                 </div>
                 <button
                   type="button"
@@ -1360,15 +1455,16 @@ function SupportApp({ onBack }) {
                 <textarea
                   value={draft}
                   onChange={(event) => setDraft(event.target.value)}
+                  disabled={selected.isAggregate}
                   onKeyDown={(event) => {
                     if (event.key === "Enter" && !event.shiftKey) {
                       event.preventDefault();
                       handleSend();
                     }
                   }}
-                  placeholder="Escribe una respuesta..."
+                  placeholder={selected.isAggregate ? "Vista agrupada: responde desde la conversación de ExoTimer." : "Escribe una respuesta..."}
                 />
-                <button className="send-button" onClick={handleSend} disabled={sending || !draft.trim()}>
+                <button className="send-button" onClick={handleSend} disabled={sending || selected.isAggregate || !draft.trim()}>
                   <Send size={18} />
                 </button>
               </div>
