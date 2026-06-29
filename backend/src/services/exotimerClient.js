@@ -1291,13 +1291,17 @@ function buildResultParticipantForm({ input, resultId, detail, mode }) {
   const eventName = clean(input.newDistance ?? input.distanceNew ?? input.evento_distancia ?? input.distance ?? input.eventName ?? patch.evento_distancia);
   const gender = clean(input.newGender ?? input.genderNew ?? input.genero ?? input.gender ?? input.genre ?? patch.genero);
   const categoryName = clean(input.newCategory ?? input.categoryNew ?? input.categoria ?? input.category ?? input.categoryName ?? patch.categoria);
+  const nextChip =
+    mode === "dorsal"
+      ? input.chip ?? input.newChip ?? nextDorsal ?? detail?.chip ?? detail?.dorsal ?? detail?.bib
+      : input.chip ?? input.newChip ?? detail?.chip ?? nextDorsal ?? detail?.dorsal ?? detail?.bib;
 
   return {
     result_id: resultId,
     selectedIds: [resultId],
     id_competicion: Number(pickCompetitionId(input)),
     dorsal: numberOrString(nextDorsal ?? detail?.dorsal ?? detail?.bib),
-    chip: numberOrString(input.chip ?? detail?.chip ?? nextDorsal ?? detail?.dorsal ?? detail?.bib),
+    chip: numberOrString(nextChip),
     participantName: participantName ?? participant.name ?? detail?.participantName ?? detail?.athleteName,
     participantLastname,
     evento_distancia: eventName ?? event.name ?? detail?.evento_distancia ?? detail?.distance,
