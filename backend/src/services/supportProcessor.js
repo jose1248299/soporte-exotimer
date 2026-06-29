@@ -334,7 +334,8 @@ function missingFieldsForAction(actionName, input = {}) {
         input.evidenceMetaTime ||
         input.horaMeta ||
         input.metaTime ||
-        input.finishTime
+        input.finishTime ||
+        ((input.activityStartDateTime || input.activityStartTime) && (input.gpsElapsedTime || input.evidenceElapsedTime || input.requestedValue))
     );
     if (!hasResultReference) missing.push("dorsal_or_resultId");
     if (!hasEvidenceFinishTime) missing.push("evidenceFinishTime");

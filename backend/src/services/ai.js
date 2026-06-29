@@ -168,10 +168,10 @@ async function classifyMessage({
     "- No ejecutes cambios tecnicos genericos, raws manuales libres ni tickets sin confirmacion humana: usa la accion, pero needsHuman=true.",
     "- Para cambios de TIEMPO de carrera de atletas, usa EXOTIMER_CREATE_RESULT_CORRECTION_CASE o humano salvo cuando haya evidencia contundente segun las reglas siguientes.",
     "- Puedes usar EXOTIMER_APPLY_RESULT_TIME_EVIDENCE_CORRECTION con needsHuman=false solo si la conversacion tiene competitionId o competitionName, dorsal/resultId, tiempo oficial actual, tiempo solicitado, y una evidencia objetiva fuerte.",
-    "- Evidencia objetiva fuerte significa: imagen/captura/foto analizada con confidence >= 0.85 o hasStrongEvidence=true, y que confirme hora de llegada/meta o tiempo GPS coherente con el reclamo. Idealmente debe verse el dorsal o el contexto debe haber identificado sin ambiguedad al atleta.",
-    "- Para EXOTIMER_APPLY_RESULT_TIME_EVIDENCE_CORRECTION extrae: competitionId, dorsal, athleteName, currentValue, requestedValue, evidenceFinishTime o evidenceFinishDateTime, evidenceConfidence, evidenceSummary, hasStrongEvidence=true, targetField='tiempo'.",
-    "- Si la evidencia solo muestra un tiempo GPS pero no la hora meta, usa evidenceFinishTime solo si puedes inferir una hora meta clara desde la evidencia o el texto. Si solo hay duracion sin hora meta, no ejecutes la correccion automatica.",
-    "- Antes de corregir tiempo automaticamente, la diferencia entre tiempo oficial y solicitado debe ser significativa, aproximadamente mayor a 2 minutos. Si la diferencia es menor, hay conflicto de datos, el dorsal no coincide, la competencia no esta clara o la imagen corresponde a otra competencia, needsHuman=true.",
+    "- Evidencia objetiva fuerte significa: imagen/captura/foto analizada con confidence >= 0.85 o hasStrongEvidence=true, y que confirme hora de llegada/meta o tiempo GPS coherente con el reclamo. Para Strava/Garmin/GPS acepta como fuerte si el reclamo estructurado ya trae competitionId, dorsal y atleta, y la imagen muestra nombre compatible o contexto del evento, fecha/lugar compatibles, distancia coherente y tiempo solicitado.",
+    "- Para EXOTIMER_APPLY_RESULT_TIME_EVIDENCE_CORRECTION extrae: competitionId, dorsal, athleteName, currentValue, requestedValue, evidenceFinishTime o evidenceFinishDateTime, activityStartDateTime, gpsElapsedTime/evidenceElapsedTime, evidenceConfidence, evidenceSummary, hasStrongEvidence=true, targetField='tiempo'.",
+    "- Si la evidencia GPS muestra hora de inicio de actividad y duracion/tiempo en movimiento, puedes usar activityStartDateTime + gpsElapsedTime para que el sistema calcule hora meta estimada. No pongas la hora de inicio como evidenceFinishDateTime salvo que sea realmente hora de llegada.",
+    "- Antes de corregir tiempo automaticamente, si existe tiempo oficial, la diferencia entre tiempo oficial y solicitado debe ser significativa, aproximadamente mayor a 2 minutos. Si no hay tiempo registrado/publicado, puedes corregir sin esa comparacion cuando la evidencia fuerte permita calcular la hora meta. Si hay conflicto de datos, el dorsal no coincide, la competencia no esta clara o la imagen corresponde a otra competencia, needsHuman=true.",
     "- Si un atleta envia un reclamo estructurado desde la web publica con competitionId, dorsal y valor correcto, puedes ejecutar cambios permitidos sin humano.",
     "- Para cambiar dorsal usa EXOTIMER_UPDATE_RESULT_DORSAL con competitionId, dorsal actual en dorsal/currentDorsal, targetField, currentValue, requestedValue y newDorsal. Al cambiar dorsal, el sistema tambien debe cambiar chip al nuevo dorsal salvo que el usuario indique explicitamente un chip distinto.",
     "- Para cambiar distancia, genero o categoria usa EXOTIMER_UPDATE_RESULT_EVENT_CATEGORY con competitionId, dorsal, targetField, currentValue, requestedValue y newDistance/newGender/newCategory segun corresponda.",
@@ -312,7 +312,7 @@ async function analyzeImageEvidence({ buffer, mimeType, caption, conversationCon
       {
         role: "system",
         content:
-          "Analiza imagenes enviadas como evidencia para soporte de cronometraje deportivo. Devuelve JSON estricto, breve y util. No inventes datos ilegibles.",
+          "Analiza imagenes enviadas como evidencia para soporte de cronometraje deportivo. Devuelve JSON estricto, breve y util. No inventes datos ilegibles. Para capturas GPS/Strava/Garmin, distingue hora de inicio de actividad (activityStartDateTime) de hora de meta/llegada (evidenceFinishDateTime). Marca hasStrongEvidence=true si la imagen muestra nombre compatible o contexto claro, fecha/lugar compatibles, distancia coherente y tiempo/duracion del reclamo con confidence >= 0.85, aunque no sea una fuente oficial.",
       },
       {
         role: "user",
@@ -332,6 +332,7 @@ async function analyzeImageEvidence({ buffer, mimeType, caption, conversationCon
                   time: null,
                   evidenceFinishTime: null,
                   evidenceFinishDateTime: null,
+                  activityStartDateTime: null,
                   gpsElapsedTime: null,
                   resultPosition: null,
                 },

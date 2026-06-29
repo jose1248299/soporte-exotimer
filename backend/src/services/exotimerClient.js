@@ -1134,6 +1134,26 @@ function datePartsToUtcMs(parts) {
   return Date.parse(formatIsoLocal({ ...parts, offset }));
 }
 
+function utcMsToDateParts(ms, offset = "-05:00") {
+  const sign = offset.startsWith("-") ? -1 : 1;
+  const match = offset.match(/[+-](\d{2}):?(\d{2})?/);
+  const offsetMinutes = match ? sign * (Number(match[1]) * 60 + Number(match[2] || 0)) : -300;
+  const local = new Date(ms + offsetMinutes * 60000);
+  return {
+    date: {
+      year: local.getUTCFullYear(),
+      month: local.getUTCMonth() + 1,
+      day: local.getUTCDate(),
+    },
+    time: {
+      hours: local.getUTCHours(),
+      minutes: local.getUTCMinutes(),
+      seconds: local.getUTCSeconds(),
+    },
+    offset,
+  };
+}
+
 function pickEventStartDateTime(detail = {}, input = {}) {
   const salidaName = normalizeText(input.salida || input.outputName || input.startName || detail?.salida || detail?.outputName);
   const salidas = Array.isArray(detail?.event?.configs?.[0]?.salidas) ? detail.event.configs[0].salidas : [];
@@ -1175,6 +1195,17 @@ function buildEvidenceFinishDateTime(input = {}, detail = {}) {
       input.metaDateTime
   );
   if (explicit) return explicit;
+
+  const elapsedSeconds = parseDurationSeconds(input.gpsElapsedTime || input.evidenceElapsedTime || input.requestedValue);
+  const eventStart = pickEventStartDateTime(detail, input);
+  if (eventStart && elapsedSeconds != null && input.preferActivityStartForGps !== true) {
+    return utcMsToDateParts(datePartsToUtcMs(eventStart) + elapsedSeconds * 1000, eventStart.offset || input.timezoneOffset || "-05:00");
+  }
+
+  const activityStart = parseLocalDateTime(input.activityStartDateTime || input.activityStartTime || input.gpsStartDateTime);
+  if (activityStart && elapsedSeconds != null) {
+    return utcMsToDateParts(datePartsToUtcMs(activityStart) + elapsedSeconds * 1000, activityStart.offset || input.timezoneOffset || "-05:00");
+  }
 
   const time = parseHms(
     input.evidenceFinishTime ||
@@ -1469,7 +1500,9 @@ function hasStrongTimeEvidence(input = {}) {
       input.evidenceMetaTime ||
       input.horaMeta ||
       input.metaTime ||
-      input.finishTime
+      input.finishTime ||
+      ((input.activityStartDateTime || input.activityStartTime || input.gpsStartDateTime) &&
+        (input.gpsElapsedTime || input.evidenceElapsedTime || input.requestedValue))
   );
   return hasObjectiveEvidence && hasTime;
 }
@@ -1493,6 +1526,20 @@ function pickRequestedSeconds(input = {}) {
     parseDurationSeconds(input.evidenceElapsedTime) ??
     parseDurationSeconds(input.gpsElapsedTime)
   );
+}
+
+function indicatesMissingOfficialTime(input = {}, detail = {}) {
+  const values = [
+    input.currentValue,
+    input.currentOfficialTime,
+    input.officialTime,
+    detail?.tiempo_oficial,
+    detail?.officialTime,
+    detail?.document?.time_TOTAL,
+  ].filter((value) => value !== undefined && value !== null && String(value).trim() !== "");
+
+  if (!values.length) return true;
+  return values.some((value) => /no\s*(especificado|registrado|tiene)|sin\s*tiempo|n\/a|null/i.test(String(value)));
 }
 
 function buildTimeCorrectionCurrent({ input, detail, finishParts }) {
@@ -1537,12 +1584,18 @@ async function applyResultTimeEvidenceCorrection(input = {}) {
   const officialSeconds = pickOfficialSeconds(normalizedInput, detail);
   const proposedSeconds = pickRequestedSeconds(normalizedInput) ?? parseDurationSeconds(timeCurrent);
   const minDifferenceSeconds = Number(normalizedInput.minDifferenceSeconds || 120);
-  if (officialSeconds == null || proposedSeconds == null) {
-    throw new Error("Falta el tiempo oficial o el tiempo propuesto para validar la diferencia.");
+  if (proposedSeconds == null) {
+    throw new Error("Falta el tiempo propuesto para validar la correccion.");
   }
-  const differenceSeconds = Math.abs(officialSeconds - proposedSeconds);
-  if (differenceSeconds < minDifferenceSeconds) {
-    throw new Error(`La diferencia con el tiempo oficial es menor a ${minDifferenceSeconds} segundos.`);
+  if (officialSeconds == null) {
+    if (!indicatesMissingOfficialTime(normalizedInput, detail)) {
+      throw new Error("Falta el tiempo oficial para validar la diferencia.");
+    }
+  } else {
+    const differenceSeconds = Math.abs(officialSeconds - proposedSeconds);
+    if (differenceSeconds < minDifferenceSeconds) {
+      throw new Error(`La diferencia con el tiempo oficial es menor a ${minDifferenceSeconds} segundos.`);
+    }
   }
 
   const rawHour = formatRawDateTime(finishParts);
