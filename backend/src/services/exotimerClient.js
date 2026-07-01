@@ -1,6 +1,7 @@
 const axios = require("axios");
 const config = require("../config");
 const { normalizeDorsal, normalizeDorsalReferences } = require("../utils/dorsal");
+const { sendImageMessage } = require("./waba");
 
 const SAFE_READ = "safe_read";
 const SAFE_WRITE = "safe_write";
@@ -61,6 +62,11 @@ const ACTIONS = {
     roles: ["ORGANIZER", "ATHLETE", "TIMER"],
     risk: SAFE_WRITE,
     description: "Reenvia el correo de confirmacion de una inscripcion ya existente.",
+  },
+  EXOTIMER_SEND_INSCRIPTION_CONFIRMATION_WHATSAPP: {
+    roles: ["ORGANIZER", "ATHLETE", "TIMER"],
+    risk: SAFE_WRITE,
+    description: "Envia por WhatsApp el QR/comprobante de confirmacion de una inscripcion existente.",
   },
   EXOTIMER_GET_RESULTS: {
     roles: ["TIMER", "ATHLETE"],
@@ -249,6 +255,155 @@ function resolveGenderOption(query) {
     return { value: "Masculino", score: 100, query: clean(query) };
   }
   return resolveOption(["Femenino", "Masculino"], query, "genero", { minScore: 70 });
+}
+
+function isGenericCategoryRequest(value) {
+  const normalized = normalizeText(value);
+  if (!normalized) return false;
+  return (
+    normalized.includes("correspondiente") ||
+    normalized.includes("segun edad") ||
+    normalized.includes("por edad") ||
+    normalized.includes("categoria correcta") ||
+    normalized.includes("categoria que corresponde")
+  );
+}
+
+function normalizeCombinationEntries(combinations = {}) {
+  const entries = [];
+  const pushEntry = (distance, category, gender, raw) => {
+    const categoryName = clean(category);
+    if (!clean(distance) || !categoryName) return;
+    entries.push({
+      distance: clean(distance),
+      category: categoryName,
+      gender: clean(gender),
+      raw,
+    });
+  };
+
+  for (const [distance, value] of Object.entries(combinations || {})) {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (typeof item === "string") {
+          pushEntry(distance, item, null, item);
+        } else if (item && typeof item === "object") {
+          pushEntry(
+            distance,
+            item.name || item.nombre || item.category || item.categoria || item.title,
+            item.genre || item.genero || item.gender || item.sex,
+            item
+          );
+        }
+      }
+      continue;
+    }
+
+    if (value && typeof value === "object") {
+      const nested = value.categories || value.categorias || value.category_details || value.items || value.options;
+      if (Array.isArray(nested)) {
+        for (const item of nested) {
+          if (typeof item === "string") {
+            pushEntry(distance, item, value.genre || value.genero || value.gender, item);
+          } else if (item && typeof item === "object") {
+            pushEntry(
+              distance,
+              item.name || item.nombre || item.category || item.categoria || item.title,
+              item.genre || item.genero || item.gender || value.genre || value.genero || value.gender,
+              item
+            );
+          }
+        }
+        continue;
+      }
+
+      for (const [maybeGender, categories] of Object.entries(value)) {
+        if (!Array.isArray(categories)) continue;
+        const gender = normalizeText(maybeGender).includes("fem")
+          ? "Femenino"
+          : normalizeText(maybeGender).includes("masc")
+            ? "Masculino"
+            : maybeGender;
+        for (const category of categories) {
+          if (typeof category === "string") {
+            pushEntry(distance, category, gender, category);
+          } else if (category && typeof category === "object") {
+            pushEntry(
+              distance,
+              category.name || category.nombre || category.category || category.categoria || category.title,
+              category.genre || category.genero || category.gender || gender,
+              category
+            );
+          }
+        }
+      }
+    }
+  }
+
+  return entries;
+}
+
+function parseCategoryAgeRange(categoryName) {
+  const text = normalizeText(categoryName).replace(/\s+/g, " ");
+  const range = text.match(/(\d{1,2})\s*(?:-|a|hasta)\s*(\d{1,2})/);
+  if (range) {
+    const min = Number(range[1]);
+    const max = Number(range[2]);
+    if (Number.isFinite(min) && Number.isFinite(max)) return { min: Math.min(min, max), max: Math.max(min, max) };
+  }
+
+  const plus = text.match(/(\d{1,2})\s*(?:\+|a mas|o mas|mas)/);
+  if (plus) {
+    const min = Number(plus[1]);
+    if (Number.isFinite(min)) return { min, max: Infinity };
+  }
+
+  const under = text.match(/(?:hasta|menor(?:es)? de|sub)\s*(\d{1,2})/);
+  if (under) {
+    const max = Number(under[1]);
+    if (Number.isFinite(max)) return { min: 0, max };
+  }
+
+  return null;
+}
+
+function resolveCategoryByAge(categoryOptions, age, gender, { distance, currentCategory } = {}) {
+  const numericAge = Number(age);
+  if (!Number.isFinite(numericAge) || numericAge <= 0) return null;
+  const normalizedGender = normalizeText(gender);
+  const matches = categoryOptions
+    .filter((item) => {
+      if (!item.gender || !normalizedGender) return true;
+      return normalizeText(item.gender) === normalizedGender;
+    })
+    .map((item) => ({ ...item, range: parseCategoryAgeRange(item.category) }))
+    .filter((item) => item.range && numericAge >= item.range.min && numericAge <= item.range.max);
+
+  const unique = [...new Map(matches.map((item) => [normalizeText(`${item.category}|${item.gender || ""}`), item])).values()];
+  if (unique.length === 1) {
+    return { value: unique[0].category, score: 100, query: String(age), resolvedBy: "participantAge", gender: unique[0].gender || null };
+  }
+  if (unique.length > 1) {
+    const distanceText = normalizeText(distance);
+    const currentHasDistance = distanceText && normalizeText(currentCategory).includes(distanceText);
+    const styleMatches = unique.filter((item) => {
+      const categoryHasDistance = distanceText && normalizeText(item.category).includes(distanceText);
+      return currentHasDistance ? categoryHasDistance : !categoryHasDistance;
+    });
+    if (styleMatches.length === 1) {
+      return {
+        value: styleMatches[0].category,
+        score: 95,
+        query: String(age),
+        resolvedBy: "participantAgeAndCurrentCategoryStyle",
+        gender: styleMatches[0].gender || null,
+      };
+    }
+  }
+  if (unique.length > 1) {
+    throw new Error(`La edad ${numericAge} coincide con varias categorias posibles.`);
+  }
+  return null;
 }
 
 function competitionScore(competition, query) {
@@ -946,6 +1101,58 @@ async function resendInscriptionConfirmation(input = {}) {
   };
 }
 
+function pickWhatsAppRecipient(input = {}, match = {}) {
+  const value = input.whatsappTo || input.to || input.deliveryPhone || input.whatsappPhone || input.conversationPhone || match.phone || input.phone;
+  if (!clean(value)) throw new Error("Falta numero WhatsApp destino.");
+  return clean(value);
+}
+
+function buildInscriptionConfirmationCaption({ match, response, competitionName }) {
+  const qrUrl = response?.qr || response?.qr_url || response?.qrUrl || null;
+  return [
+    `Hola ${match.name || response?.nombre || "participante"}, te compartimos la confirmacion de tu inscripcion:`,
+    "",
+    `Evento: ${competitionName || match.competitionName || "Evento"}`,
+    `Participante: ${match.name || [response?.nombre, response?.apellidos].filter(Boolean).join(" ") || "No especificado"}`,
+    `DNI: ${match.dni || response?.dni || "No especificado"}`,
+    `Distancia: ${match.distance || response?.distancia || "No especificado"}`,
+    `Categoria: ${match.category || response?.categoria || "No especificado"}`,
+    `Genero: ${match.gender || response?.genero || "No especificado"}`,
+    `Inscripcion: #${match.id || response?.id || "No especificado"}`,
+    "",
+    "Presenta este QR/comprobante para validar tu inscripcion cuando sea necesario.",
+    qrUrl ? `QR: ${qrUrl}` : "",
+  ].filter((line) => line !== "").join("\n");
+}
+
+async function sendInscriptionConfirmationWhatsApp(input = {}) {
+  const result = await resendInscriptionConfirmation(input);
+  const match = result.lookup.bestMatch;
+  const recipient = pickWhatsAppRecipient(input, match);
+  const qrUrl = result.response?.qr || result.response?.qr_url || result.response?.qrUrl;
+  if (!qrUrl) throw new Error("Exotimer no devolvio URL de QR para enviar por WhatsApp.");
+
+  const caption = buildInscriptionConfirmationCaption({
+    match,
+    response: result.response,
+    competitionName: input.competitionName,
+  });
+  const sent = await sendImageMessage(recipient, qrUrl, caption);
+
+  return {
+    ...result,
+    whatsappSent: true,
+    whatsapp: {
+      to: recipient,
+      type: "image",
+      qrUrl,
+      caption,
+      providerResponse: sent,
+      providerMessageId: sent?.messages?.[0]?.id || null,
+    },
+  };
+}
+
 async function getResults(input) {
   return apiRequest({
     method: "POST",
@@ -1342,10 +1549,124 @@ function buildResultParticipantForm({ input, resultId, detail, mode }) {
   };
 }
 
+function getRequestedResultEventValues(input = {}) {
+  const targetField = normalizeText(input.targetField || input.field || "");
+  const genericRequestedValue = requestedValue(input);
+  return {
+    distance: clean(
+      input.newDistance ||
+        input.distanceNew ||
+        input.evento_distancia ||
+        input.distance ||
+        input.requestedDistance ||
+        (targetField.includes("distancia") || targetField.includes("distance") || targetField.includes("evento")
+          ? genericRequestedValue
+          : null)
+    ),
+    gender: clean(
+      input.newGender ||
+        input.genderNew ||
+        input.genero ||
+        input.gender ||
+        input.genre ||
+        input.requestedGender ||
+        (targetField.includes("genero") || targetField.includes("gender") || targetField.includes("sexo") ? genericRequestedValue : null)
+    ),
+    category: clean(
+      input.newCategory ||
+        input.categoryNew ||
+        input.categoria ||
+        input.category ||
+        input.categoryName ||
+        input.requestedCategory ||
+        (targetField.includes("categoria") || targetField.includes("category") ? genericRequestedValue : null)
+    ),
+  };
+}
+
+async function resolveResultEventCombination(input, detail, form) {
+  const competitionId = pickCompetitionId(input);
+  const combineData = await getInscriptionCombineData(competitionId);
+  const entries = normalizeCombinationEntries(combineData.combinations);
+  const distanceOptions = [...new Set(entries.map((item) => item.distance).filter(Boolean))];
+  if (!distanceOptions.length) {
+    throw new Error("No se pudieron cargar combinaciones reales de distancia/categoria para esta competencia.");
+  }
+
+  const requested = getRequestedResultEventValues(input);
+  const before = {
+    distance: detail?.event?.name ?? detail?.evento_distancia ?? detail?.distance ?? form.evento_distancia,
+    gender: detail?.event?.category?.genre ?? detail?.genero ?? detail?.gender ?? form.genero,
+    category: detail?.event?.category?.name ?? detail?.categoria ?? detail?.category ?? form.categoria,
+  };
+
+  const resolvedDistance = requested.distance
+    ? resolveOption(distanceOptions, requested.distance, "distancia")
+    : resolveOption(distanceOptions, before.distance, "distancia");
+  const distanceEntries = entries.filter((item) => normalizeText(item.distance) === normalizeText(resolvedDistance.value));
+
+  const resolvedGender = requested.gender ? resolveGenderOption(requested.gender) : { value: before.gender, score: 100, query: before.gender };
+  const requestedCategoryIsGeneric = isGenericCategoryRequest(requested.category);
+  const categoryOptions = distanceEntries
+    .filter((item) => !resolvedGender.value || !item.gender || normalizeText(item.gender) === normalizeText(resolvedGender.value))
+    .map((item) => item.category);
+
+  let resolvedCategory = null;
+  if (requested.category && !requestedCategoryIsGeneric) {
+    resolvedCategory = resolveOption(categoryOptions, requested.category, "categoria");
+  } else if (requestedCategoryIsGeneric) {
+    resolvedCategory = resolveCategoryByAge(distanceEntries, input.participantAge || input.age || input.edad, resolvedGender.value, {
+      distance: resolvedDistance.value,
+      currentCategory: before.category,
+    });
+    if (!resolvedCategory) {
+      throw new Error("No se pudo resolver una categoria real del evento a partir de la edad indicada.");
+    }
+  }
+  if (!resolvedCategory) {
+    resolvedCategory = resolveOption(categoryOptions, before.category, "categoria");
+  }
+
+  return {
+    combineData,
+    resolvedCombination: {
+      distance: resolvedDistance,
+      gender: resolvedGender,
+      category: resolvedCategory,
+      available: {
+        distances: distanceOptions,
+        categories: categoryOptions,
+      },
+    },
+    formPatch: {
+      evento_distancia: resolvedDistance.value,
+      genero: resolvedGender.value,
+      categoria: resolvedCategory.value,
+    },
+  };
+}
+
+function summarizeResultDetail(detail) {
+  return {
+    dorsal: detail?.dorsal ?? detail?.bib,
+    participantName: detail?.participant?.name ?? detail?.participantName ?? detail?.athleteName,
+    participantLastname: detail?.participant?.lastname ?? detail?.participantLastname ?? detail?.lastname,
+    evento_distancia: detail?.event?.name ?? detail?.evento_distancia ?? detail?.distance,
+    genero: detail?.event?.category?.genre ?? detail?.genero ?? detail?.gender,
+    categoria: detail?.event?.category?.name ?? detail?.categoria ?? detail?.category,
+  };
+}
+
 async function updateResultParticipant(input, mode) {
   const normalizedInput = normalizeDorsalReferences(input);
   const { resultId, detail } = await resolveResultForUpdate(normalizedInput);
   const form = buildResultParticipantForm({ input: normalizedInput, resultId, detail, mode });
+  let resolvedEvent = null;
+
+  if (mode === "event_category") {
+    resolvedEvent = await resolveResultEventCombination(normalizedInput, detail, form);
+    Object.assign(form, resolvedEvent.formPatch);
+  }
 
   const required = ["dorsal", "participantName", "participantLastname", "evento_distancia", "genero", "categoria"];
   const missing = required.filter((key) => isBlank(form[key]));
@@ -1357,22 +1678,33 @@ async function updateResultParticipant(input, mode) {
     data: form,
   };
   const saved = await apiRequest(request);
+  const verificationDetail = firstDetail(await getResultDetail({ resultId }));
+  if (mode === "event_category") {
+    const after = summarizeResultDetail(verificationDetail);
+    if (
+      normalizeText(after.evento_distancia) !== normalizeText(form.evento_distancia) ||
+      normalizeText(after.genero) !== normalizeText(form.genero) ||
+      normalizeText(after.categoria) !== normalizeText(form.categoria)
+    ) {
+      throw new Error("El resultado se guardo, pero la verificacion posterior no coincide con la combinacion solicitada.");
+    }
+  }
 
   return {
     ...buildAudit({ method: request.method, path: request.path, payload: request.data, response: saved }),
+    ...(resolvedEvent
+      ? {
+          combineData: resolvedEvent.combineData,
+          resolvedCombination: resolvedEvent.resolvedCombination,
+          verification: summarizeResultDetail(verificationDetail),
+        }
+      : { verification: summarizeResultDetail(verificationDetail) }),
     saved,
     changed: {
       competitionId: pickCompetitionId(input),
       resultId,
       mode,
-      before: {
-        dorsal: detail?.dorsal ?? detail?.bib,
-        participantName: detail?.participant?.name ?? detail?.participantName ?? detail?.athleteName,
-        participantLastname: detail?.participant?.lastname ?? detail?.participantLastname ?? detail?.lastname,
-        evento_distancia: detail?.event?.name ?? detail?.evento_distancia ?? detail?.distance,
-        genero: detail?.event?.category?.genre ?? detail?.genero ?? detail?.gender,
-        categoria: detail?.event?.category?.name ?? detail?.categoria ?? detail?.category,
-      },
+      before: summarizeResultDetail(detail),
       after: form,
     },
   };
@@ -1702,6 +2034,7 @@ const HANDLERS = {
   EXOTIMER_UPDATE_INSCRIPTION_EMAIL: updateInscriptionEmail,
   EXOTIMER_UPDATE_INSCRIPTION_EVENT_CATEGORY: updateInscriptionEventCategory,
   EXOTIMER_RESEND_INSCRIPTION_CONFIRMATION: resendInscriptionConfirmation,
+  EXOTIMER_SEND_INSCRIPTION_CONFIRMATION_WHATSAPP: sendInscriptionConfirmationWhatsApp,
   EXOTIMER_GET_RESULTS: getResults,
   EXOTIMER_GET_RESULT_DETAIL: getResultDetail,
   EXOTIMER_CREATE_RESULT_CORRECTION_CASE: createResultCorrectionCase,

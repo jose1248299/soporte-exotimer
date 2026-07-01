@@ -43,6 +43,19 @@ async function sendTextMessage(to, body) {
   });
 }
 
+async function sendImageMessage(to, link, caption) {
+  return postMessage({
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: normalizePhone(to),
+    type: "image",
+    image: {
+      link,
+      ...(caption ? { caption } : {}),
+    },
+  });
+}
+
 async function getMediaUrl(mediaId) {
   assertMetaConfig();
 
@@ -75,4 +88,4 @@ async function downloadMedia(mediaId) {
   };
 }
 
-module.exports = { downloadMedia, sendTextMessage };
+module.exports = { downloadMedia, sendImageMessage, sendTextMessage };

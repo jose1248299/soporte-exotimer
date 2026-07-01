@@ -127,6 +127,7 @@ function actionNeedsCompetitionId(actionName) {
     "EXOTIMER_UPDATE_INSCRIPTION_EMAIL",
     "EXOTIMER_UPDATE_INSCRIPTION_EVENT_CATEGORY",
     "EXOTIMER_RESEND_INSCRIPTION_CONFIRMATION",
+    "EXOTIMER_SEND_INSCRIPTION_CONFIRMATION_WHATSAPP",
     "EXOTIMER_GET_RESULTS",
     "EXOTIMER_UPDATE_RESULT_PARTICIPANT_DATA",
     "EXOTIMER_UPDATE_RESULT_DORSAL",
@@ -212,6 +213,7 @@ function missingFieldsForAction(actionName, input = {}) {
       "EXOTIMER_UPDATE_INSCRIPTION_EMAIL",
       "EXOTIMER_UPDATE_INSCRIPTION_EVENT_CATEGORY",
       "EXOTIMER_RESEND_INSCRIPTION_CONFIRMATION",
+      "EXOTIMER_SEND_INSCRIPTION_CONFIRMATION_WHATSAPP",
     ].includes(actionName)
   ) {
     const hasLookupReference = Boolean(
@@ -623,6 +625,9 @@ async function processConversationReply(conversationId) {
       });
     } else {
       try {
+        if (classification.action === "EXOTIMER_SEND_INSCRIPTION_CONFIRMATION_WHATSAPP" && isWhatsapp) {
+          actionInput.whatsappTo = conversation.phone;
+        }
         actionResult = await executeAction(userType, classification.action, actionInput, {
           allowByPolicy: true,
         });
@@ -636,6 +641,10 @@ async function processConversationReply(conversationId) {
         await prisma.supportAction.update({
           where: { id: action.id },
           data: { status: "FAILED", error: actionError },
+        });
+        await prisma.conversation.update({
+          where: { id: conversation.id },
+          data: { status: "WAITING_HUMAN" },
         });
       }
     }
