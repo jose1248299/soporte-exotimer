@@ -1,5 +1,6 @@
 const axios = require("axios");
 const config = require("../config");
+const prisma = require("../lib/prisma");
 const { normalizeDorsal, normalizeDorsalReferences } = require("../utils/dorsal");
 const { sendImageMessage } = require("./waba");
 
@@ -134,6 +135,18 @@ const ACTIONS = {
     risk: SAFE_READ,
     description: "Consulta readers/canales activos.",
   },
+  EXOTIMER_CREATE_COMPETITION_FROM_BASES: {
+    roles: ["TIMER"],
+    risk: NEEDS_CONFIRMATION,
+    description:
+      "Crea una competencia desde bases, afiche o datos estructurados, y opcionalmente configura distancias y salidas.",
+  },
+  EXOTIMER_CREATE_COMPETITION_FROM_CHAT: {
+    roles: ["TIMER"],
+    risk: NEEDS_CONFIRMATION,
+    description:
+      "Crea una competencia desde datos escritos en la conversacion, y opcionalmente configura distancias y salidas.",
+  },
   BUYER_CREATE_PRICE_INQUIRY: {
     roles: ["BUYER"],
     risk: SAFE_WRITE,
@@ -219,6 +232,16 @@ function optionScore(option, query) {
   if (!normalizedOption || !normalizedQuery) return 0;
   if (normalizedOption === normalizedQuery) return 100;
   if (normalizedOption.includes(normalizedQuery) || normalizedQuery.includes(normalizedOption)) return 85;
+  const compactOption = normalizedOption.replace(/[^a-z0-9]+/g, "");
+  const compactQuery = normalizedQuery.replace(/[^a-z0-9]+/g, "");
+  if (compactOption && compactQuery && (compactOption === compactQuery)) return 100;
+  if (
+    compactOption.length >= 3 &&
+    compactQuery.length >= 3 &&
+    (compactOption.startsWith(compactQuery) || compactQuery.startsWith(compactOption))
+  ) {
+    return 82;
+  }
 
   const queryTokens = tokenize(query);
   const optionTokens = new Set(tokenize(option));
@@ -475,6 +498,47 @@ async function apiRequest({ method = "GET", path, data, params, headers, retryOn
   }
 }
 
+async function apiMultipartRequest({ method = "POST", path, fields = {}, files = {}, retryOnAuth = true }) {
+  assertClientConfig();
+  const token = await getAccessToken();
+  const formData = new FormData();
+
+  for (const [key, value] of Object.entries(fields)) {
+    if (value === undefined || value === null) continue;
+    formData.append(key, typeof value === "string" ? value : JSON.stringify(value));
+  }
+
+  for (const [key, file] of Object.entries(files)) {
+    if (!file?.buffer) continue;
+    const blob = new Blob([file.buffer], { type: file.mimeType || "application/octet-stream" });
+    formData.append(key, blob, file.filename || `${key}.bin`);
+  }
+
+  try {
+    const { data: responseData } = await axios.request({
+      baseURL: config.exotimer.baseUrl,
+      url: path,
+      method,
+      data: formData,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json",
+      },
+      timeout: 30000,
+    });
+
+    return responseData;
+  } catch (error) {
+    if (retryOnAuth && error.response?.status === 401) {
+      cachedAccessToken = null;
+      await loginExotimer();
+      return apiMultipartRequest({ method, path, fields, files, retryOnAuth: false });
+    }
+
+    throw error;
+  }
+}
+
 async function listCompetitions() {
   return apiRequest({ path: "/v2/competitions/list/" });
 }
@@ -520,6 +584,207 @@ async function getCompetitionEvents(input) {
 async function getTickets(input) {
   const competitionId = pickCompetitionId(input);
   return apiRequest({ path: `/api/inscription/ticket/list/${competitionId}/` });
+}
+
+async function getCompetitionCatalogs() {
+  const [countries, cities, sports, organizers] = await Promise.all([
+    apiRequest({ path: "/api/competition/paises/list/" }),
+    apiRequest({ path: "/api/competition/cities/list/" }),
+    apiRequest({ path: "/v2/competitions/sports/list/" }),
+    apiRequest({ path: "/api/organizers/" }),
+  ]);
+
+  return {
+    countries: Array.isArray(countries) ? countries : [],
+    cities: Array.isArray(cities) ? cities : [],
+    sports: Array.isArray(sports) ? sports : [],
+    organizers: Array.isArray(organizers) ? organizers : [],
+  };
+}
+
+function bestCatalogMatch(items, query, getLabel, label, { minScore = 55, fallback } = {}) {
+  const cleanQuery = clean(query);
+  if (!cleanQuery && fallback) return fallback();
+  if (!cleanQuery) throw new Error(`Falta ${label}.`);
+
+  const candidates = items
+    .map((item) => ({ item, score: optionScore(getLabel(item), cleanQuery) }))
+    .sort((a, b) => b.score - a.score);
+  const best = candidates[0];
+  if (!best || best.score < minScore) {
+    if (fallback) return fallback();
+    throw new Error(`No se encontro ${label} para "${cleanQuery}".`);
+  }
+
+  const second = candidates[1];
+  if (second && second.score === best.score && normalizeText(getLabel(second.item)) !== normalizeText(getLabel(best.item))) {
+    throw new Error(`${label} "${cleanQuery}" es ambiguo.`);
+  }
+
+  return best.item;
+}
+
+function parseCompetitionDate(value) {
+  const text = clean(value);
+  if (!text) return null;
+  const iso = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (iso) return text;
+
+  const numeric = text.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
+  if (numeric) {
+    const [, dd, mm, yyyy] = numeric;
+    return `${yyyy}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
+  }
+
+  const months = {
+    ene: "01",
+    enero: "01",
+    feb: "02",
+    febrero: "02",
+    mar: "03",
+    marzo: "03",
+    abr: "04",
+    abril: "04",
+    may: "05",
+    mayo: "05",
+    jun: "06",
+    junio: "06",
+    jul: "07",
+    julio: "07",
+    ago: "08",
+    agosto: "08",
+    sep: "09",
+    set: "09",
+    septiembre: "09",
+    oct: "10",
+    octubre: "10",
+    nov: "11",
+    noviembre: "11",
+    dic: "12",
+    diciembre: "12",
+  };
+  const named = normalizeText(text).match(/(\d{1,2})\s+([a-z]+)\s+(\d{4})/);
+  if (named && months[named[2]]) {
+    return `${named[3]}-${months[named[2]]}-${String(named[1]).padStart(2, "0")}`;
+  }
+
+  throw new Error(`Fecha de competencia no reconocida: ${text}. Usa YYYY-MM-DD o DD/MM/YYYY.`);
+}
+
+function formatDateTimePayload(date, time = "08:00") {
+  const [yyyy, mm, dd] = date.split("-");
+  const parts = String(time || "08:00").match(/(\d{1,2}):?(\d{2})?/);
+  const hh = parts ? String(parts[1]).padStart(2, "0") : "08";
+  const min = parts && parts[2] ? String(parts[2]).padStart(2, "0") : "00";
+  return `${dd}/${mm}/${yyyy}, ${hh}:${min}:00`;
+}
+
+function normalizeDistance(input) {
+  if (typeof input === "object" && input) {
+    const name = clean(input.name || input.distance || input.distancia || input.label);
+    const km = clean(input.km || input.distanceKm || input.value);
+    return normalizeDistance(name || km);
+  }
+
+  const text = clean(input);
+  if (!text) return null;
+  const match = text.replace(",", ".").match(/(\d+(?:\.\d+)?)\s*(k|km)?/i);
+  if (!match) return { name: text.toUpperCase(), meters: "0" };
+  const km = Number(match[1]);
+  const display = Number.isInteger(km) ? String(km) : String(km).replace(".", ",");
+  return { name: `${display}K`, meters: String(Math.round(km * 1000)) };
+}
+
+function normalizeDistances(input) {
+  const source = Array.isArray(input) ? input : cleanList(input);
+  const distances = source.map(normalizeDistance).filter(Boolean);
+  const unique = [...new Map(distances.map((item) => [normalizeText(item.name), item])).values()];
+  if (!unique.length) throw new Error("Faltan distancias para configurar.");
+  return unique;
+}
+
+function makeEventUid() {
+  return `_${Math.random().toString(36).slice(2, 11)}`;
+}
+
+function buildSimpleDistanceEvents({ competitionId, distances, date, startTime = "08:00", createCategories = false, genders }) {
+  const start = formatDateTimePayload(date, startTime);
+  const rangeInit = formatDateTimePayload(date, "05:00");
+  const rangeFinish = formatDateTimePayload(date, "17:00");
+  const categoryGenders = genders || { masculino: true, femenino: true, mixto: false };
+
+  return distances.map((distance, index) => ({
+    id: Date.now() + index,
+    eventFormProps: {
+      nombre: distance.name,
+      cam_details: null,
+      tickets: [],
+    },
+    sharedStateProps: {
+      child1Forms: [
+        {
+          id: makeEventUid(),
+          data: {
+            nombre: "Salida",
+            localizacion: "SALIDA",
+            tiempoMinimo: "0",
+            tiempoMinimoVuelta: "0",
+            tipo: "Salida",
+            distancia: "0",
+            tipoSalida: "cronometro",
+            readers: [{ id: 0, mac: `reader_SALIDA_${competitionId}`, model: null, status: null, mask_name: null, organizer: 0, install_date: null, last_connection: null, firmware_version: null }],
+            rangeInit,
+            rangeFinish,
+          },
+        },
+        {
+          id: makeEventUid(),
+          data: {
+            nombre: "Meta",
+            localizacion: "META",
+            tiempoMinimo: "0",
+            tiempoMinimoVuelta: "0",
+            tipo: "Meta",
+            distancia: distance.meters,
+            readers: [{ id: 0, mac: `reader_META_${competitionId}`, model: null, status: null, mask_name: null, organizer: 0, install_date: null, last_connection: null, firmware_version: null }],
+            rangeInit,
+            rangeFinish,
+          },
+        },
+      ],
+      child2Forms: [
+        {
+          id: makeEventUid(),
+          data: {
+            nombre: "General",
+            tipoMedia: "min/km",
+            tramos: [{ minValue: 0, maxValue: 1 }],
+            official: true,
+          },
+        },
+      ],
+      child3Forms: [
+        {
+          id: makeEventUid(),
+          data: {
+            nombre: distance.name,
+            fecha: start,
+          },
+        },
+      ],
+      child4Forms: createCategories
+        ? [
+            {
+              id: makeEventUid(),
+              data: {
+                nombre: `${distance.name} GENERAL`,
+                generos: categoryGenders,
+              },
+            },
+          ]
+        : [],
+    },
+  }));
 }
 
 function toEventFormData(event) {
@@ -620,6 +885,211 @@ async function updateEventTicket(input) {
       patch,
     },
   };
+}
+
+async function getMessageBannerFile(input = {}) {
+  const messageId = Number(input.messageId || input.message_id);
+  if (!Number.isInteger(messageId)) return null;
+
+  const message = await prisma.message.findUnique({
+    where: { id: messageId },
+    select: {
+      id: true,
+      contentType: true,
+      mediaData: true,
+      mediaMimeType: true,
+      mediaFilename: true,
+    },
+  });
+
+  if (!message?.mediaData || !String(message.mediaMimeType || "").startsWith("image/")) return null;
+  const extension = String(message.mediaMimeType).includes("png") ? "png" : "jpg";
+  return {
+    buffer: Buffer.from(message.mediaData),
+    mimeType: message.mediaMimeType || "image/jpeg",
+    filename: message.mediaFilename || `bases-${message.id}.${extension}`,
+  };
+}
+
+async function createCompetitionFromBases(input = {}) {
+  const extracted = input.mediaAnalysis?.extracted || input.imageAnalysis?.extracted || {};
+  const competitionName = clean(
+    input.competitionName ||
+      input.name ||
+      input.eventName ||
+      extracted.competitionName ||
+      extracted.eventName ||
+      extracted.name
+  );
+  const date = parseCompetitionDate(
+    input.date ||
+      input.eventDate ||
+      input.competitionDate ||
+      extracted.eventDate ||
+      extracted.date ||
+      extracted.competitionDate
+  );
+  const countryHint = clean(input.country || input.countryName || extracted.country || extracted.countryName) || "Perú";
+  const cityHint = clean(input.city || input.cityName || extracted.city || extracted.cityName);
+  const sportHint = clean(input.sport || input.sportName || extracted.sport || extracted.sportName) || "Trail Run";
+  const organizerHint = clean(input.organizer || input.organizerName || extracted.organizer || extracted.organizerName);
+  const allowUnassignedOrganizer =
+    input.allowUnassignedOrganizer === true ||
+    input.useUnassignedOrganizer === true ||
+    input.organizer === "Sin Asignar" ||
+    normalizeText(organizerHint).includes("sin asignar");
+  const distances = normalizeDistances(
+    input.distances ||
+      input.distanceOptions ||
+      input.distance ||
+      input.distancia ||
+      extracted.distances ||
+      extracted.distanceOptions ||
+      extracted.distance
+  );
+
+  if (!competitionName) throw new Error("Falta nombre de competencia.");
+  if (!date) throw new Error("Falta fecha de competencia.");
+  if (!cityHint) throw new Error("Falta ciudad de competencia.");
+
+  const catalogs = await getCompetitionCatalogs();
+  const country = bestCatalogMatch(catalogs.countries, countryHint, (item) => item.pais || item.name || item.codigo, "pais");
+  const cityCandidates = catalogs.cities.filter((item) => !country?.id || !item.pais || String(item.pais) === String(country.id));
+  const city = bestCatalogMatch(cityCandidates.length ? cityCandidates : catalogs.cities, cityHint, (item) => item.city || item.name, "ciudad");
+  const sport = bestCatalogMatch(catalogs.sports, sportHint, (item) => item.name, "deporte");
+  const organizer = bestCatalogMatch(catalogs.organizers, organizerHint, (item) => item.name, "organizador", {
+    minScore: 65,
+    fallback: allowUnassignedOrganizer
+      ? () => catalogs.organizers.find((item) => normalizeText(item.name) === "sin asignar" || normalizeText(item.name).includes("sin asignar"))
+      : undefined,
+  });
+  if (!organizer) throw new Error("No se encontro organizador. Indica un organizador valido o autoriza usar Sin Asignar.");
+
+  const banner = input.useMessageImageAsBanner === false ? null : await getMessageBannerFile(input);
+  const website = clean(input.website || input.web || extracted.website || extracted.web);
+  const description = {
+    face: false,
+    extra: {},
+    sheet: "",
+    waLink: "",
+    buyPhoto: false,
+    gapVideo: 0,
+    type_pay: "voucher",
+    photoLink: "#",
+    public_key: null,
+    trackingEnd: "",
+    access_token: null,
+    collector_id: null,
+    trackingInit: "",
+    application_fee: 15,
+    payments_details: website ? `Web: ${website}` : "",
+    type_competition: "evento",
+    campeonato_nacional: false,
+    taller: {
+      faq: [],
+      costo: "",
+      cupos: "",
+      fecha: "",
+      lugar: "",
+      nivel: "",
+      title: "",
+      banner: "",
+      galeria: [],
+      incluye: [],
+      resumen: "",
+      reviews: [],
+      contacto: {},
+      duracion: "",
+      horarios: [],
+      objetivos: [],
+      cupos_text: "",
+      dirigido_a: [],
+      requisitos: [],
+      condiciones: [],
+      payments_details: "",
+      ticketDescriptions: {},
+    },
+  };
+
+  const createResponse = await apiMultipartRequest({
+    path: "/api/competition/create/",
+    fields: {
+      name: competitionName,
+      date,
+      country: String(country.id),
+      city: String(city.id),
+      sport: String(sport.id),
+      organizer: String(organizer.id),
+      description,
+    },
+    files: banner ? { banner } : {},
+  });
+
+  const competitionId = Array.isArray(createResponse) ? createResponse[0] : createResponse?.id || createResponse?.competition || createResponse;
+  if (!competitionId) throw new Error("ExoTimer no devolvio id de competencia creada.");
+
+  const shouldConfigureDistances = input.configureDistances !== false;
+  let eventCreateResponse = null;
+  if (shouldConfigureDistances) {
+    const form = buildSimpleDistanceEvents({
+      competitionId,
+      distances,
+      date,
+      startTime: input.startTime || input.start || extracted.startTime || "08:00",
+      createCategories: input.createCategories === true,
+    });
+    eventCreateResponse = await apiRequest({
+      method: "POST",
+      path: "/api/competition/event/create/",
+      data: { competition: Number(competitionId), form },
+    });
+  }
+
+  const detail = await apiRequest({ path: `/api/competition/one-event/${competitionId}` });
+  let salidas = null;
+  try {
+    salidas = await apiRequest({ path: `/v2/raws/config/salidas/${competitionId}/` });
+  } catch {
+    salidas = null;
+  }
+
+  return {
+    created: true,
+    competitionId: Number(competitionId),
+    competition: {
+      id: detail?.id || Number(competitionId),
+      name: detail?.name || competitionName,
+      date: detail?.date || date,
+      country: detail?.country || country.pais || country.name,
+      city: detail?.city || city.city || city.name,
+      sport: detail?.sport || sport.name,
+      organizer: detail?.organizer || organizer.name,
+      config: detail?.config ?? null,
+      banner: detail?.banner || null,
+    },
+    distances: distances.map((item) => item.name),
+    startTime: input.startTime || input.start || extracted.startTime || "08:00",
+    categoriesCreated: input.createCategories === true,
+    eventCreateResponse,
+    salidas,
+    audit: {
+      catalogs: {
+        country,
+        city,
+        sport,
+        organizer,
+      },
+      usedMessageImageAsBanner: Boolean(banner),
+    },
+  };
+}
+
+async function createCompetitionFromChat(input = {}) {
+  return createCompetitionFromBases({
+    ...input,
+    useMessageImageAsBanner: false,
+    creationSource: "chat",
+  });
 }
 
 async function getInscription(input) {
@@ -2125,6 +2595,8 @@ const HANDLERS = {
   EXOTIMER_EDIT_RESULT_TIME: editResultTime,
   EXOTIMER_APPLY_RESULT_TIME_EVIDENCE_CORRECTION: applyResultTimeEvidenceCorrection,
   EXOTIMER_GET_CONNECTED_READERS: getConnectedReaders,
+  EXOTIMER_CREATE_COMPETITION_FROM_BASES: createCompetitionFromBases,
+  EXOTIMER_CREATE_COMPETITION_FROM_CHAT: createCompetitionFromChat,
   BUYER_CREATE_PRICE_INQUIRY: createBuyerInquiry,
 };
 

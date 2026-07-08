@@ -346,6 +346,27 @@ function missingFieldsForAction(actionName, input = {}) {
     if (!hasEvidenceFinishTime) missing.push("evidenceFinishTime");
   }
 
+  if (actionName === "EXOTIMER_CREATE_COMPETITION_FROM_BASES" || actionName === "EXOTIMER_CREATE_COMPETITION_FROM_CHAT") {
+    const extracted = input.mediaAnalysis?.extracted || input.imageAnalysis?.extracted || {};
+    const hasName = Boolean(input.competitionName || input.eventName || input.name || extracted.competitionName || extracted.eventName || extracted.name);
+    const hasDate = Boolean(input.date || input.eventDate || input.competitionDate || extracted.eventDate || extracted.date || extracted.competitionDate);
+    const hasCity = Boolean(input.city || input.cityName || extracted.city || extracted.cityName);
+    const hasDistances = Boolean(
+      input.distances ||
+        input.distanceOptions ||
+        input.distance ||
+        input.distancia ||
+        extracted.distances ||
+        extracted.distanceOptions ||
+        extracted.distance
+    );
+
+    if (!hasName) missing.push("competitionName");
+    if (!hasDate) missing.push("eventDate");
+    if (!hasCity) missing.push("city");
+    if (!hasDistances) missing.push("distances");
+  }
+
   return missing;
 }
 
@@ -611,6 +632,12 @@ async function processConversationReply(conversationId) {
     ...classification,
     actionInput: normalizeDorsalReferences(classification.actionInput || {}),
   };
+  if (classification.actionInput?.confirmed === true) {
+    classification = {
+      ...classification,
+      needsHuman: false,
+    };
+  }
 
   const userType = trustedSystemUser ? "SYSTEM_USER" : timer ? "TIMER" : classification.userType;
   const contextResolution = await resolveCompetitionForAction(userType, classification);
@@ -753,6 +780,11 @@ async function processConversationReply(conversationId) {
       source: isExotimer ? "exotimer" : "whatsapp",
       phone: conversation.phone,
       message: processableText,
+      messageId: triggerMessage.id,
+      mediaAnalysis: triggerMessage.mediaAnalysis || null,
+      mediaContentType: triggerMessage.contentType,
+      mediaMimeType: triggerMessage.mediaMimeType || null,
+      mediaFilename: triggerMessage.mediaFilename || null,
     };
 
     if (!trustedSystemUser && !policy.enabled) {

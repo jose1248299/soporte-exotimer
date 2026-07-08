@@ -2,7 +2,10 @@ const OpenAI = require("openai");
 const { z } = require("zod");
 const config = require("../config");
 const { ACTIONS, canExecuteAction, requiresConfirmation } = require("./exotimerClient");
-const { buildExotimerAssistantKnowledge } = require("./exotimerKnowledge");
+const {
+  buildExotimerAssistantKnowledge,
+  buildTimerAssistantKnowledge,
+} = require("./exotimerKnowledge");
 
 const actionNames = Object.keys(ACTIONS);
 
@@ -40,9 +43,52 @@ function parseJson(text) {
   }
 }
 
+const normalizeForIntent = (value) =>
+  String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+
+function isTimerCompetitionCreationRequest(text) {
+  const lower = normalizeForIntent(text);
+  return /(crear|crea|creame|configur|alta|nuevo|nueva).{0,50}(competencia|evento|distancia|carrera)|competencia.{0,50}(imagen|afiche|bases|crear|configur)|evento.{0,50}(imagen|afiche|bases|crear|configur)|bases.{0,50}(competencia|evento|crear)/.test(lower);
+}
+
+function isTimerCompetitionCreationContext({ text, previousClassification, history = [] } = {}) {
+  if (isTimerCompetitionCreationRequest(text)) return true;
+  const previousAction = previousClassification?.action;
+  const previousIntent = normalizeForIntent(previousClassification?.intent || previousClassification?.summary);
+  if (
+    previousAction === "EXOTIMER_CREATE_COMPETITION_FROM_BASES" ||
+    previousAction === "EXOTIMER_CREATE_COMPETITION_FROM_CHAT" ||
+    previousIntent.includes("competition_creation") ||
+    previousIntent.includes("crear competencia") ||
+    previousIntent.includes("crear evento")
+  ) {
+    return true;
+  }
+
+  const recent = history
+    .slice(-6)
+    .map((message) => message.content)
+    .join(" ");
+  return isTimerCompetitionCreationRequest(recent);
+}
+
 function heuristicClassify(text, forcedTimer) {
   if (forcedTimer) {
-    const lower = String(text || "").toLowerCase();
+    const lower = normalizeForIntent(text);
+    if (isTimerCompetitionCreationRequest(text)) {
+      return {
+        ...fallbackClassification,
+        userType: "TIMER",
+        confidence: 0.9,
+        intent: "timer_competition_creation_guidance",
+        summary: "Timer solicita ayuda para crear o configurar competencia/evento.",
+        needsHuman: false,
+      };
+    }
+
     if (/(reader|lectora|conectad|canal|equipo)/.test(lower)) {
       return {
         ...fallbackClassification,
@@ -125,7 +171,10 @@ async function classifyMessage({
   channel = "WHATSAPP",
   trustedSystemUser = false,
 }) {
-  if (forcedTimer) return heuristicClassify(text, true);
+  const timerCreationContext = forcedTimer
+    ? isTimerCompetitionCreationContext({ text, previousClassification, history })
+    : false;
+  if (forcedTimer && !timerCreationContext) return heuristicClassify(text, true);
 
   const client = getClient();
   if (!client) return heuristicClassify(text, false);
@@ -188,6 +237,24 @@ async function classifyMessage({
     "- Si el usuario reclama que en su inscripcion eligio mal distancia, genero o categoria, usa EXOTIMER_UPDATE_INSCRIPTION_EVENT_CATEGORY con competitionId o competitionName, referencia/DNI/email/phone/nombre, targetField y newDistance/newGender/newCategory o requestedValue. Usa needsHuman=false si hay una unica coincidencia clara por DNI, referencia, email o telefono y el valor correcto esta disponible.",
     "- Si el usuario no recibio el correo de confirmacion y tienes competitionId o competitionName mas referencia/DNI/email/telefono/nombre, usa EXOTIMER_RESEND_INSCRIPTION_CONFIRMATION. Usa needsHuman=false si hay referencia, DNI, email o telefono claro; si solo hay nombre ambiguo, needsHuman=true. En la respuesta ofrece tambien la alternativa de enviar el comprobante/QR por WhatsApp si el correo no llega.",
     "- Si despues de reenviar correo el usuario pide explicitamente recibir el comprobante, QR o confirmacion por WhatsApp, usa EXOTIMER_SEND_INSCRIPTION_CONFIRMATION_WHATSAPP con competitionId y los datos de busqueda disponibles. Usa needsHuman=false si hay una unica inscripcion clara por DNI, email, telefono o referencia.",
+    forcedTimer
+      ? "- Para TIMER que pide crear/configurar competencia desde bases, afiche o imagen, usa EXOTIMER_CREATE_COMPETITION_FROM_BASES si tienes nombre, fecha, ciudad y distancias. Esta accion requiere confirmacion: usa needsHuman=true salvo que el Timer confirme explicitamente la creacion."
+      : "",
+    forcedTimer
+      ? "- Para TIMER que pide crear/configurar competencia con datos escritos directamente en la conversacion, usa EXOTIMER_CREATE_COMPETITION_FROM_CHAT si tienes nombre, fecha, ciudad y distancias. Esta accion requiere confirmacion: usa needsHuman=true salvo que el Timer confirme explicitamente la creacion."
+      : "",
+    forcedTimer
+      ? "- Para EXOTIMER_CREATE_COMPETITION_FROM_BASES y EXOTIMER_CREATE_COMPETITION_FROM_CHAT extrae: competitionName, eventDate en YYYY-MM-DD si puedes, city, country, sport, organizer, distances como array, startTime, website, allowUnassignedOrganizer, createCategories=false si pide dejar categorias para despues, useMessageImageAsBanner=true solo cuando la imagen es el afiche o bases."
+      : "",
+    forcedTimer
+      ? "- Si el Timer confirma explicitamente crear la competencia ya resumida, conserva la misma accion y actionInput anterior sin degradar valores ya normalizados, agrega confirmed=true y usa needsHuman=false."
+      : "",
+    forcedTimer
+      ? "- Si el organizador falta y el Timer autoriza Sin Asignar, usa organizer='Sin Asignar' y allowUnassignedOrganizer=true. Si no lo autoriza, pide organizador o autorizacion para Sin Asignar."
+      : "",
+    forcedTimer
+      ? "- No inventes categorias. Si el Timer no las especifica o dice que se cargaran despues con listado, usa createCategories=false."
+      : "",
     "- Para compradores, usa BUYER_CREATE_PRICE_INQUIRY; la cotizacion comercial vive fuera de Exotimer.",
     "Contexto persistente:",
     JSON.stringify({
@@ -199,6 +266,7 @@ async function classifyMessage({
       history,
     }),
     trustedSystemUser ? buildExotimerAssistantKnowledge() : "",
+    forcedTimer ? buildTimerAssistantKnowledge() : "",
     `Mensaje actual: ${text}`,
   ].join("\n");
 
@@ -237,7 +305,7 @@ function fallbackReply(userType) {
     return "Hola, te ayudo con la configuracion de tickets o inscripciones. Indicame la competencia, distancia, ticket y cambio requerido.";
   }
   if (userType === "TIMER") {
-    return "Hola, Timer identificado. Indicame la competencia, punto de control o salida, y el cambio exacto que necesitas revisar.";
+    return "Hola, Timer identificado. Indicame si necesitas crear/configurar una competencia o revisar una competencia, punto de control, salida o cambio tecnico.";
   }
   return "Hola, gracias por escribir a Finisher Data. Cuentame si consultas por inscripciones o resultados de un evento?";
 }
@@ -264,6 +332,12 @@ async function composeReply({
       : actionPending
         ? "La accion fue registrada como pendiente de confirmacion humana. No se ejecuto aun."
         : "No se ejecuto ninguna accion automatica.";
+  const operationalKnowledge =
+    channel === "EXOTIMER"
+      ? buildExotimerAssistantKnowledge()
+      : userType === "TIMER"
+        ? buildTimerAssistantKnowledge()
+        : "";
 
   const completion = await client.chat.completions.create({
     model: config.openai.model,
@@ -280,10 +354,15 @@ async function composeReply({
             "Si contextActionResult.followUpResolution.type es RESULT_TIME_UPDATED_DORSAL_PENDING, informa que el tiempo ya figura actualizado, pero que el dorsal visible aun queda pendiente de revision. Menciona el dorsal actual y el dorsal solicitado.",
             "Si se ejecuto EXOTIMER_RESEND_INSCRIPTION_CONFIRMATION, informa que se reenvio al correo y ofrece explicitamente la alternativa: si no le llega, puede pedir que se le envie el comprobante/QR por WhatsApp.",
             "Si se ejecuto EXOTIMER_SEND_INSCRIPTION_CONFIRMATION_WHATSAPP, informa que el comprobante/QR fue enviado por WhatsApp y que puede revisar este chat.",
+            "Si actionPending.action es EXOTIMER_CREATE_COMPETITION_FROM_BASES o EXOTIMER_CREATE_COMPETITION_FROM_CHAT, resume nombre, fecha, ciudad, deporte, organizador, distancias, hora de partida, categorias e inscripciones; pide confirmacion explicita para crearla en produccion.",
+            "Si actionResult.created y classification.action es EXOTIMER_CREATE_COMPETITION_FROM_BASES o EXOTIMER_CREATE_COMPETITION_FROM_CHAT, informa el ID de competencia, distancias creadas y salidas verificadas.",
             channel === "EXOTIMER"
               ? "Si la consulta es informativa, responde como asistente operativo usando el manual y contexto de ExoTimer. Si se ejecuto una accion, resume que se hizo y que debe revisar el usuario."
               : "",
-            channel === "EXOTIMER" ? buildExotimerAssistantKnowledge() : "",
+            userType === "TIMER"
+              ? "El usuario esta identificado como TIMER por telefono registrado. Puedes orientarlo con conocimiento operativo de creacion/configuracion de competencias, pero no afirmes escrituras si no hubo accion ejecutada."
+              : "",
+            operationalKnowledge,
           ]
             .filter(Boolean)
             .join("\n"),
@@ -320,7 +399,7 @@ async function analyzeImageEvidence({ buffer, mimeType, caption, conversationCon
       {
         role: "system",
         content:
-          "Analiza imagenes enviadas como evidencia para soporte de cronometraje deportivo. Devuelve JSON estricto, breve y util. No inventes datos ilegibles. Para capturas GPS/Strava/Garmin, distingue hora de inicio de actividad (activityStartDateTime) de hora de meta/llegada (evidenceFinishDateTime). Marca hasStrongEvidence=true si la imagen muestra nombre compatible o contexto claro, fecha/lugar compatibles, distancia coherente y tiempo/duracion del reclamo con confidence >= 0.85, aunque no sea una fuente oficial. Si la imagen solo aporta una pieza parcial fuerte, por ejemplo dorsal visible en meta/salida o GPS con tiempo, explicalo en evidenceSummary para que el hilo completo pueda usarse bajo TRUST_ATHLETE_EVIDENCE.",
+          "Analiza imagenes enviadas como evidencia o bases/afiche para soporte de cronometraje deportivo. Devuelve JSON estricto, breve y util. No inventes datos ilegibles. Si la imagen es afiche/bases de evento, extrae nombre del evento, fecha, ciudad/pais si aparecen o son razonablemente inferibles por texto principal, distancias, web/contacto, deporte y organizador si aparecen. Para capturas GPS/Strava/Garmin, distingue hora de inicio de actividad (activityStartDateTime) de hora de meta/llegada (evidenceFinishDateTime). Marca hasStrongEvidence=true si la imagen muestra nombre compatible o contexto claro, fecha/lugar compatibles, distancia coherente y tiempo/duracion del reclamo con confidence >= 0.85, aunque no sea una fuente oficial. Si la imagen solo aporta una pieza parcial fuerte, por ejemplo dorsal visible en meta/salida o GPS con tiempo, explicalo en evidenceSummary para que el hilo completo pueda usarse bajo TRUST_ATHLETE_EVIDENCE.",
       },
       {
         role: "user",
@@ -337,6 +416,15 @@ async function analyzeImageEvidence({ buffer, mimeType, caption, conversationCon
                   athleteName: null,
                   dorsal: null,
                   competitionName: null,
+                  eventName: null,
+                  eventDate: null,
+                  city: null,
+                  country: null,
+                  sport: null,
+                  organizer: null,
+                  distances: [],
+                  website: null,
+                  startTime: null,
                   time: null,
                   evidenceFinishTime: null,
                   evidenceFinishDateTime: null,
