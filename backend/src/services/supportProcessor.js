@@ -337,7 +337,10 @@ function missingFieldsForAction(actionName, input = {}) {
         input.horaMeta ||
         input.metaTime ||
         input.finishTime ||
-        ((input.activityStartDateTime || input.activityStartTime) && (input.gpsElapsedTime || input.evidenceElapsedTime || input.requestedValue))
+        ((input.activityStartDateTime || input.activityStartTime) && (input.gpsElapsedTime || input.evidenceElapsedTime || input.requestedValue)) ||
+        (input.trustAthleteEvidence === true && (input.gpsElapsedTime || input.evidenceElapsedTime || input.requestedValue)) ||
+        (String(input.evidencePolicy || input.policyMode || "").toUpperCase() === "TRUST_ATHLETE_EVIDENCE" &&
+          (input.gpsElapsedTime || input.evidenceElapsedTime || input.requestedValue))
     );
     if (!hasResultReference) missing.push("dorsal_or_resultId");
     if (!hasEvidenceFinishTime) missing.push("evidenceFinishTime");

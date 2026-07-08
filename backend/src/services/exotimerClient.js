@@ -1427,6 +1427,74 @@ function buildEvidenceFinishDateTime(input = {}, detail = {}) {
   return { date, time, offset: input.timezoneOffset || "-05:00" };
 }
 
+function isTrustAthleteEvidenceEnabled(input = {}) {
+  return (
+    input.trustAthleteEvidence === true ||
+    input.TRUST_ATHLETE_EVIDENCE === true ||
+    String(input.evidencePolicy || input.policyMode || "").toUpperCase() === "TRUST_ATHLETE_EVIDENCE"
+  );
+}
+
+function buildAthleteEvidenceTrustAssessment(input = {}, detail = {}) {
+  const summary = normalizeText([input.evidenceSummary, input.evidence, input.message, input.requestedCorrection].filter(Boolean).join(" "));
+  const hasCompetition = Boolean(input.competitionId || input.competition_id || input.competition);
+  const hasStructuredClaim = Boolean(hasCompetition && (input.dorsal || input.bib || input.currentDorsal) && (input.athleteName || input.participantName));
+  const hasDorsalEvidence = Boolean(
+    input.dorsalEvidence === true ||
+      input.hasDorsalPhoto === true ||
+      /(dorsal|bib|numero).{0,40}(visible|claro|meta|salida|foto|oficial)|foto.{0,50}dorsal/.test(summary)
+  );
+  const hasFinishOrParticipationEvidence = Boolean(
+    input.finishEvidence === true ||
+      input.hasFinishPhoto === true ||
+      /(meta|llegada|finish|cruzando|cruzo|oficial).{0,60}(dorsal|foto|visible|arco|evento)/.test(summary)
+  );
+  const hasGpsEvidence = Boolean(
+    input.gpsElapsedTime ||
+      input.evidenceElapsedTime ||
+      input.activityStartDateTime ||
+      input.gpsStartDateTime ||
+      /(gps|strava|garmin|coros|reloj|actividad|ruta|distancia|desnivel)/.test(summary)
+  );
+  const hasTimeEvidence = Boolean(
+    input.evidenceFinishDateTime ||
+      input.evidenceMetaDateTime ||
+      input.evidenceFinishTime ||
+      input.evidenceMetaTime ||
+      input.horaMeta ||
+      input.metaTime ||
+      input.finishTime ||
+      input.requestedValue ||
+      input.gpsElapsedTime ||
+      input.evidenceElapsedTime
+  );
+  const hasDateOrEventContext = Boolean(
+    input.activityStartDateTime ||
+      input.eventDate ||
+      input.competitionDate ||
+      input.competitionName ||
+      /(fecha|dia|evento|utcb|carrera|competencia|compatible|coherente)/.test(summary)
+  );
+  const currentMissing = indicatesMissingOfficialTime(input, detail);
+
+  const signals = [
+    hasStructuredClaim && "structured_claim",
+    hasDorsalEvidence && "dorsal_evidence",
+    hasFinishOrParticipationEvidence && "finish_or_participation_evidence",
+    hasGpsEvidence && "gps_or_watch_evidence",
+    hasTimeEvidence && "time_evidence",
+    hasDateOrEventContext && "date_or_event_context",
+    currentMissing && "missing_current_time",
+  ].filter(Boolean);
+
+  return {
+    enabled: isTrustAthleteEvidenceEnabled(input),
+    accepted: isTrustAthleteEvidenceEnabled(input) && hasStructuredClaim && hasTimeEvidence && signals.length >= 4,
+    signals,
+    summary: input.evidenceSummary || input.requestedCorrection || null,
+  };
+}
+
 function findRawByIdCandidate(value) {
   if (!value) return null;
   if (value.id) return value.id;
@@ -1816,6 +1884,9 @@ async function editResultTime(input) {
 }
 
 function hasStrongTimeEvidence(input = {}) {
+  const trustAssessment = buildAthleteEvidenceTrustAssessment(input);
+  if (trustAssessment.accepted) return true;
+
   if (input.hasStrongEvidence === true || input.evidenceStrength === "strong" || input.evidenceStrength === "contundente") {
     return true;
   }
@@ -1891,6 +1962,10 @@ async function applyResultTimeEvidenceCorrection(input = {}) {
   const normalizedInput = normalizeDorsalReferences(input);
   const competitionId = pickCompetitionId(normalizedInput);
   const { resultId, detail } = await resolveResultForUpdate(normalizedInput);
+  const trustAssessment = buildAthleteEvidenceTrustAssessment(normalizedInput, detail);
+  if (trustAssessment.enabled && normalizedInput.preferActivityStartForGps == null) {
+    normalizedInput.preferActivityStartForGps = true;
+  }
   const dorsal = normalizeDorsal(
     normalizedInput.dorsal ||
       normalizedInput.bib ||
@@ -1962,6 +2037,8 @@ async function applyResultTimeEvidenceCorrection(input = {}) {
   return {
     created: true,
     type: "RESULT_TIME_EVIDENCE_CORRECTION",
+    evidencePolicy: trustAssessment.enabled ? "TRUST_ATHLETE_EVIDENCE" : "STRICT_EVIDENCE",
+    evidenceTrustAssessment: trustAssessment,
     changed: {
       competitionId,
       resultId,
