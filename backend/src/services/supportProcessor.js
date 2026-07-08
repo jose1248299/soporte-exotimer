@@ -349,6 +349,129 @@ function missingFieldsForAction(actionName, input = {}) {
   return missing;
 }
 
+function isResultFollowUpMessage(text = "", classification = {}) {
+  const normalized = String(`${text} ${classification.intent || ""} ${classification.summary || ""}`)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+  return /(novedad|seguimiento|estado|avance|respuesta|ya.*revis|sigue|actualiz|mi caso|requesta|reclamo)/.test(normalized);
+}
+
+function pickResultOfficialTime(result = {}) {
+  return result.tiempo_oficial || result.officialTime || result.official_time || result.time || result.tiempo || null;
+}
+
+function pickResultFinishTime(result = {}) {
+  return result.hora_meta || result.finishTime || result.finish_time || result.metaTime || null;
+}
+
+function summarizeResultForClosure(result = {}) {
+  const participant = result.participant || {};
+  const event = result.event || {};
+  const category = event.category || {};
+  return {
+    resultId: result.id || result.result_id || result.resultId,
+    dorsal: result.dorsal ?? result.bib,
+    chip: result.chip,
+    athleteName: participant.name || result.participantName || result.athleteName || result.name || null,
+    athleteLastname: participant.lastname || result.participantLastname || result.lastname || null,
+    distance: event.name || result.evento_distancia || result.salida || result.distance || null,
+    gender: category.genre || result.genero || result.gender || null,
+    category: category.name || result.categoria || result.category || null,
+    officialTime: pickResultOfficialTime(result),
+    finishTime: pickResultFinishTime(result),
+    state: result.state || null,
+  };
+}
+
+function resultHasPublishedTime(result = {}) {
+  const officialTime = pickResultOfficialTime(result);
+  return Boolean(officialTime && String(officialTime).trim());
+}
+
+function uniqueStrings(values = []) {
+  return [...new Set(values.filter((value) => value !== undefined && value !== null && String(value).trim()).map((value) => String(value).trim()))];
+}
+
+async function resolveResultFollowUpIfAlreadyUpdated({ conversation, supportCase, classification, text, userType }) {
+  const input = classification.actionInput || {};
+  if (classification.userType !== "ATHLETE" && userType !== "ATHLETE") return null;
+  if (!isResultFollowUpMessage(text, classification)) return null;
+
+  const competitionId = input.competitionId || input.competition_id || supportCase?.competitionId;
+  const dorsals = uniqueStrings([
+    input.dorsal,
+    input.bib,
+    input.currentDorsal,
+    input.oldDorsal,
+    input.previousDorsal,
+    ...(Array.isArray(input.detectedDorsals) ? input.detectedDorsals : []),
+  ]);
+  const requestedDorsals = uniqueStrings([input.newDorsal, input.dorsalNew, input.correctDorsal, input.requestedDorsal]);
+  if (!competitionId || (!dorsals.length && !requestedDorsals.length)) return null;
+
+  const list = await executeAction(userType, "EXOTIMER_GET_RESULTS", { competitionId }, { allowByPolicy: true });
+  const rows = Array.isArray(list) ? list : list?.results || list?.data || [];
+  const findByDorsals = (targets) =>
+    rows.find((row) => targets.some((dorsal) => String(row.dorsal) === dorsal || String(row.chip) === dorsal));
+
+  const currentResult = findByDorsals(dorsals);
+  const requestedResult = findByDorsals(requestedDorsals);
+  const result = requestedResult || currentResult;
+  if (!result || !resultHasPublishedTime(result)) return null;
+
+  const resultId = result.id || result.result_id || result.resultId;
+  let detail = result;
+  if (resultId) {
+    try {
+      detail = await executeAction(userType, "EXOTIMER_GET_RESULT_DETAIL", { resultId }, { allowByPolicy: true });
+    } catch {
+      detail = result;
+    }
+  }
+
+  const summary = summarizeResultForClosure(detail);
+  const requestedDorsal = requestedDorsals[0] || null;
+  const actualDorsal = summary.dorsal != null ? String(summary.dorsal) : null;
+  const hasPendingDorsalChange = Boolean(requestedDorsal && actualDorsal && requestedDorsal !== actualDorsal);
+  const resolutionType = hasPendingDorsalChange ? "RESULT_TIME_UPDATED_DORSAL_PENDING" : "RESULT_ALREADY_UPDATED";
+
+  if (supportCase?.id) {
+    await prisma.supportCase.update({
+      where: { id: supportCase.id },
+      data: {
+        status: hasPendingDorsalChange ? "WAITING_HUMAN" : "RESOLVED",
+        summary: hasPendingDorsalChange
+          ? `${supportCase.summary || classification.summary || ""} Tiempo verificado en ExoTimer; queda pendiente validar cambio de dorsal ${actualDorsal} -> ${requestedDorsal}.`.trim()
+          : `${supportCase.summary || classification.summary || ""} Resultado verificado como actualizado en ExoTimer.`.trim(),
+        lastMessageAt: new Date(),
+      },
+    });
+  }
+
+  await prisma.conversation.update({
+    where: { id: conversation.id },
+    data: {
+      status: hasPendingDorsalChange ? "WAITING_HUMAN" : "RESOLVED",
+    },
+  });
+
+  return {
+    type: resolutionType,
+    action: "EXOTIMER_GET_RESULT_DETAIL",
+    checkedAt: new Date().toISOString(),
+    competitionId: String(competitionId),
+    requestedDorsal,
+    pendingDorsalChange: hasPendingDorsalChange
+      ? {
+          requestedDorsal,
+          actualDorsal,
+        }
+      : null,
+    result: summary,
+  };
+}
+
 function buildImageAnalysisText(mediaAnalysis) {
   if (!mediaAnalysis) return "";
   const extracted = mediaAnalysis.extracted || {};
@@ -572,8 +695,38 @@ async function processConversationReply(conversationId) {
   let actionResult = null;
   let actionError = null;
   let actionPending = null;
-  const contextActionResult = contextResolution.contextActionResult;
-  const contextActionError = contextResolution.contextActionError;
+  let contextActionResult = contextResolution.contextActionResult;
+  let contextActionError = contextResolution.contextActionError;
+
+  try {
+    const followUpResolution = await resolveResultFollowUpIfAlreadyUpdated({
+      conversation,
+      supportCase,
+      classification,
+      text: processableText,
+      userType,
+    });
+    if (followUpResolution) {
+      contextActionResult = {
+        ...(contextActionResult || {}),
+        followUpResolution,
+      };
+      classification = {
+        ...classification,
+        action: null,
+        needsHuman: Boolean(followUpResolution.pendingDorsalChange),
+        summary: followUpResolution.pendingDorsalChange
+          ? `${classification.summary} El tiempo ya figura actualizado en ExoTimer, pero queda pendiente revisar el cambio de dorsal.`
+          : `${classification.summary} El resultado ya figura actualizado en ExoTimer.`,
+      };
+      await prisma.conversation.update({
+        where: { id: conversation.id },
+        data: { classification },
+      });
+    }
+  } catch (error) {
+    contextActionError = error.message;
+  }
 
   if (classification.action) {
     const policy = await getPolicy(userType, classification.action);

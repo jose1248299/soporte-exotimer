@@ -276,6 +276,8 @@ async function composeReply({
             `Eres soporte de Finisher Data por ${channel === "EXOTIMER" ? "el chat interno de ExoTimer para usuarios autenticados del sistema" : "WhatsApp"}.`,
             "Responde en espanol, breve, amable y accionable. Usa el historial para continuar el caso sin pedir de nuevo datos ya entregados.",
             "No inventes cambios realizados. Si falta informacion, pidela claramente. Si algo quedo pendiente de confirmacion humana, dilo sin afirmar que ya se cambio.",
+            "Si contextActionResult.followUpResolution.type es RESULT_ALREADY_UPDATED, informa que ya verificaste ExoTimer, menciona tiempo oficial, distancia/evento y dorsal actual, pide actualizar la pagina de resultados y cierra amablemente sin decir que sigue en revision.",
+            "Si contextActionResult.followUpResolution.type es RESULT_TIME_UPDATED_DORSAL_PENDING, informa que el tiempo ya figura actualizado, pero que el dorsal visible aun queda pendiente de revision. Menciona el dorsal actual y el dorsal solicitado.",
             "Si se ejecuto EXOTIMER_RESEND_INSCRIPTION_CONFIRMATION, informa que se reenvio al correo y ofrece explicitamente la alternativa: si no le llega, puede pedir que se le envie el comprobante/QR por WhatsApp.",
             "Si se ejecuto EXOTIMER_SEND_INSCRIPTION_CONFIRMATION_WHATSAPP, informa que el comprobante/QR fue enviado por WhatsApp y que puede revisar este chat.",
             channel === "EXOTIMER"
