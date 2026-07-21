@@ -1,8 +1,8 @@
-const axios = require("axios");
 const config = require("../config");
 const prisma = require("../lib/prisma");
 const { normalizeDorsal, normalizeDorsalReferences } = require("../utils/dorsal");
-const { sendImageMessage } = require("./waba");
+const { apiMultipartRequest, apiRequest, loginRaceline } = require("./racelineClient");
+const { sendDocumentMessage } = require("./waba");
 
 const SAFE_READ = "safe_read";
 const SAFE_WRITE = "safe_write";
@@ -61,8 +61,8 @@ const ACTIONS = {
   },
   EXOTIMER_RESEND_INSCRIPTION_CONFIRMATION: {
     roles: ["ORGANIZER", "ATHLETE", "TIMER"],
-    risk: SAFE_WRITE,
-    description: "Reenvia el correo de confirmacion de una inscripcion ya existente.",
+    risk: SAFE_READ,
+    description: "Consulta la confirmacion existente y prepara la alternativa de entrega por WhatsApp.",
   },
   EXOTIMER_SEND_INSCRIPTION_CONFIRMATION_WHATSAPP: {
     roles: ["ORGANIZER", "ATHLETE", "TIMER"],
@@ -154,42 +154,7 @@ const ACTIONS = {
   },
 };
 
-let cachedAccessToken = config.exotimer.token || null;
-
-function assertClientConfig() {
-  if (!config.exotimer.baseUrl) {
-    throw new Error("Falta configurar EXOTIMER_API_BASE_URL");
-  }
-}
-
-async function loginExotimer() {
-  if (!config.exotimer.user || !config.exotimer.password) {
-    if (cachedAccessToken) return cachedAccessToken;
-    throw new Error("Falta configurar EXOTIMER_API_TOKEN o EXOTIMER_API_USER/EXOTIMER_API_PASSWORD");
-  }
-
-  const { data } = await axios.post(
-    `${config.exotimer.baseUrl}/api/token/`,
-    {
-      user_firebase: config.exotimer.user,
-      password: config.exotimer.password,
-    },
-    {
-      headers: { "Content-Type": "application/json" },
-      timeout: 15000,
-    }
-  );
-
-  const token = data?.access || data?.token || data?.jwt;
-  if (!token) throw new Error("Exotimer no devolvio access token.");
-  cachedAccessToken = token;
-  return cachedAccessToken;
-}
-
-async function getAccessToken() {
-  if (cachedAccessToken) return cachedAccessToken;
-  return loginExotimer();
-}
+const loginExotimer = loginRaceline;
 
 function canExecuteAction(userType, actionName) {
   const action = ACTIONS[actionName];
@@ -304,6 +269,28 @@ function normalizeCombinationEntries(combinations = {}) {
       raw,
     });
   };
+
+  if (Array.isArray(combinations?.events)) {
+    for (const event of combinations.events) {
+      const categories = Array.isArray(event.categories) ? event.categories : [];
+      for (const eventCategory of categories) {
+        const category = eventCategory?.category || eventCategory;
+        pushEntry(
+          event.name,
+          category?.name,
+          category?.gender_rule || category?.gender || category?.genre,
+          {
+            event,
+            eventId: event.id,
+            eventCategoryId: eventCategory?.id || null,
+            categoryId: category?.id || eventCategory?.category_id || null,
+            category,
+          }
+        );
+      }
+    }
+    return entries;
+  }
 
   for (const [distance, value] of Object.entries(combinations || {})) {
     if (Array.isArray(value)) {
@@ -466,81 +453,67 @@ function buildAudit({ method = "GET", path, payload, params, response }) {
   };
 }
 
-async function apiRequest({ method = "GET", path, data, params, headers, retryOnAuth = true }) {
-  assertClientConfig();
-  const token = await getAccessToken();
-
-  try {
-    const { data: responseData } = await axios.request({
-      baseURL: config.exotimer.baseUrl,
-      url: path,
-      method,
-      data,
-      params,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/json",
-        "Content-Type": "application/json",
-        ...(headers || {}),
-      },
-      timeout: 20000,
-    });
-
-    return responseData;
-  } catch (error) {
-    if (retryOnAuth && error.response?.status === 401) {
-      cachedAccessToken = null;
-      await loginExotimer();
-      return apiRequest({ method, path, data, params, headers, retryOnAuth: false });
-    }
-
-    throw error;
+async function requestAllPages(path, params = {}, limit = 500) {
+  const rows = [];
+  for (let offset = 0; offset < 100000; offset += limit) {
+    const page = asArray(await apiRequest({ path, params: { ...params, limit, offset } }));
+    rows.push(...page);
+    if (page.length < limit) break;
   }
+  return rows;
 }
 
-async function apiMultipartRequest({ method = "POST", path, fields = {}, files = {}, retryOnAuth = true }) {
-  assertClientConfig();
-  const token = await getAccessToken();
-  const formData = new FormData();
+function legacyCompetitionId(competition = {}) {
+  const match = String(competition.slug || "").match(/-(\d+)$/);
+  return match ? Number(match[1]) : null;
+}
 
-  for (const [key, value] of Object.entries(fields)) {
-    if (value === undefined || value === null) continue;
-    formData.append(key, typeof value === "string" ? value : JSON.stringify(value));
-  }
+function mapCompetition(competition = {}) {
+  return {
+    ...competition,
+    date: competition.start_date?.slice?.(0, 10) || competition.date || null,
+    end_date: competition.end_date?.slice?.(0, 10) || competition.end_date || null,
+    banner: competition.banner_url || competition.banner || null,
+    country: competition.country_id ?? competition.country ?? null,
+    city: competition.city_id ?? competition.city ?? null,
+    sport: competition.sport_id ?? competition.sport ?? null,
+    legacyId: legacyCompetitionId(competition),
+  };
+}
 
-  for (const [key, file] of Object.entries(files)) {
-    if (!file?.buffer) continue;
-    const blob = new Blob([file.buffer], { type: file.mimeType || "application/octet-stream" });
-    formData.append(key, blob, file.filename || `${key}.bin`);
-  }
+let competitionCache = { expiresAt: 0, rows: [] };
 
-  try {
-    const { data: responseData } = await axios.request({
-      baseURL: config.exotimer.baseUrl,
-      url: path,
-      method,
-      data: formData,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/json",
-      },
-      timeout: 30000,
-    });
+async function listCompetitionRows({ force = false } = {}) {
+  if (!force && competitionCache.expiresAt > Date.now()) return competitionCache.rows;
 
-    return responseData;
-  } catch (error) {
-    if (retryOnAuth && error.response?.status === 401) {
-      cachedAccessToken = null;
-      await loginExotimer();
-      return apiMultipartRequest({ method, path, fields, files, retryOnAuth: false });
-    }
-
-    throw error;
-  }
+  const statuses = [null, "draft", "published", "finished", "cancelled"];
+  const lists = await Promise.all(
+    statuses.map((status) =>
+      requestAllPages(
+        "/catalog/api/v1/competitions/",
+        status ? { status_filter: status } : {}
+      ).catch(() => [])
+    )
+  );
+  const byId = new Map();
+  lists.flat().forEach((competition) => byId.set(String(competition.id), mapCompetition(competition)));
+  competitionCache = { expiresAt: Date.now() + 60000, rows: [...byId.values()] };
+  return competitionCache.rows;
 }
 
 async function listCompetitions() {
-  return apiRequest({ path: "/v2/competitions/list/" });
+  const competitions = await listCompetitionRows();
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const future_competitions = [];
+  const past_competitions = [];
+
+  competitions.forEach((competition) => {
+    const date = competition.date ? new Date(`${competition.date}T00:00:00`) : null;
+    (date && date < today ? past_competitions : future_competitions).push(competition);
+  });
+
+  return { future_competitions, past_competitions, all_competitions: competitions };
 }
 
 function flattenCompetitions(data) {
@@ -562,6 +535,17 @@ async function findCompetition(input) {
   if (wantedId) {
     const foundById = competitions.find((item) => String(item.id) === String(wantedId));
     if (foundById) return { match: foundById, candidates: [foundById] };
+
+    const foundByLegacyId = competitions.find(
+      (item) => String(item.legacyId ?? legacyCompetitionId(item)) === String(wantedId)
+    );
+    if (foundByLegacyId) {
+      return {
+        match: foundByLegacyId,
+        candidates: [foundByLegacyId],
+        resolvedFromLegacyId: true,
+      };
+    }
   }
 
   if (!query) return { match: null, candidates: competitions.slice(0, 10) };
@@ -576,22 +560,77 @@ async function findCompetition(input) {
   return { match: ambiguous ? null : best || null, candidates: candidates.slice(0, 10), ambiguous };
 }
 
+async function resolveCompetitionInput(input = {}) {
+  if (input._competitionResolved) return input;
+  const requestedCompetitionId = input.competitionId || input.competition_id || input.competition;
+  const resolution = await findCompetition({
+    competitionId: requestedCompetitionId,
+    competitionName: input.competitionName || input.eventCompetitionName,
+  });
+
+  if (!resolution.match) {
+    if (resolution.ambiguous) throw new Error("La competencia indicada es ambigua.");
+    throw new Error(`No se encontro la competencia ${requestedCompetitionId || input.competitionName || "solicitada"}.`);
+  }
+
+  return {
+    ...input,
+    competitionId: resolution.match.id,
+    competition_id: resolution.match.id,
+    _competitionResolved: true,
+    _requestedCompetitionId: requestedCompetitionId || null,
+    _resolvedCompetition: resolution.match,
+  };
+}
+
 async function getCompetitionEvents(input) {
-  const competitionId = pickCompetitionId(input);
-  return apiRequest({ path: `/v2/competitions/events/${competitionId}/` });
+  const resolvedInput = await resolveCompetitionInput(input);
+  const competitionId = pickCompetitionId(resolvedInput);
+  const [events, tickets] = await Promise.all([
+    requestAllPages("/catalog/api/v1/events/", { competition_id: Number(competitionId) }),
+    requestAllPages("/registration/api/v1/tickets/", { competition_id: Number(competitionId) }),
+  ]);
+
+  return events.map((event) => ({
+    ...event,
+    configs: event.extra_data?.admin_form?.configs || event.extra_data?.configs || null,
+    category_details: event.category_details || event.extra_data?.admin_form?.category_details || [],
+    tickets: tickets
+      .filter((ticket) => {
+        const eventIds = [
+          ...(Array.isArray(ticket.event_ids) ? ticket.event_ids : []),
+          ...(Array.isArray(ticket.event_bindings) ? ticket.event_bindings.map((item) => item.event_id) : []),
+        ];
+        return eventIds.length === 0 || eventIds.some((id) => String(id) === String(event.id));
+      })
+      .map(normalizeTicket),
+  }));
 }
 
 async function getTickets(input) {
-  const competitionId = pickCompetitionId(input);
-  return apiRequest({ path: `/api/inscription/ticket/list/${competitionId}/` });
+  const resolvedInput = await resolveCompetitionInput(input);
+  const competitionId = pickCompetitionId(resolvedInput);
+  const tickets = await requestAllPages("/registration/api/v1/tickets/", {
+    competition_id: Number(competitionId),
+  });
+  return tickets.map(normalizeTicket);
+}
+
+function normalizeTicket(ticket = {}) {
+  return {
+    ...ticket,
+    amount: ticket.price ?? ticket.amount,
+    startDate: ticket.starts_at ?? ticket.startDate,
+    endDate: ticket.ends_at ?? ticket.endDate,
+  };
 }
 
 async function getCompetitionCatalogs() {
   const [countries, cities, sports, organizers] = await Promise.all([
-    apiRequest({ path: "/api/competition/paises/list/" }),
-    apiRequest({ path: "/api/competition/cities/list/" }),
-    apiRequest({ path: "/v2/competitions/sports/list/" }),
-    apiRequest({ path: "/api/organizers/" }),
+    requestAllPages("/catalog/api/v1/countries"),
+    requestAllPages("/catalog/api/v1/cities", {}, 500),
+    requestAllPages("/catalog/api/v1/sports/"),
+    requestAllPages("/identity/api/v1/organizations/"),
   ]);
 
   return {
@@ -787,6 +826,81 @@ function buildSimpleDistanceEvents({ competitionId, distances, date, startTime =
   }));
 }
 
+function slugify(value) {
+  return normalizeText(value)
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 220);
+}
+
+function formatCompetitionDateTime(date, time = "08:00") {
+  const match = String(time || "08:00").match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  const hour = match ? String(match[1]).padStart(2, "0") : "08";
+  const minute = match ? match[2] : "00";
+  const second = match?.[3] || "00";
+  return `${date}T${hour}:${minute}:${second}-05:00`;
+}
+
+function buildCompetitionSetupEvents({ competitionSlug, distances, date, startTime = "08:00", createCategories = false }) {
+  const startsAt = formatCompetitionDateTime(date, startTime);
+  const rangeStartAt = formatCompetitionDateTime(date, "05:00");
+  const rangeEndAt = formatCompetitionDateTime(date, "23:59");
+
+  return distances.map((distance, index) => {
+    const clientKey = slugify(distance.name) || `distance-${index + 1}`;
+    return {
+      client_key: clientKey,
+      name: distance.name,
+      start_at: startsAt,
+      distance_meters: Number(distance.meters) || null,
+      is_active: true,
+      categories: createCategories
+        ? [
+            {
+              category: {
+                name: `${distance.name} GENERAL`,
+                gender_rule: "Mixto",
+                is_active: true,
+              },
+              is_enabled: true,
+            },
+          ]
+        : [],
+      routes: [{ name: "principal", is_primary: true }],
+      timing_config: {
+        type_salidas: "cronometro",
+        start_waves: [{ client_key: "general", name: distance.name, starts_at: startsAt, sort_order: 0 }],
+        checkpoints: [
+          {
+            client_key: "start",
+            sequence: 0,
+            name: "Salida",
+            kind: "start",
+            location_code: "SALIDA",
+            distance_meters: 0,
+            range_start_at: rangeStartAt,
+            range_end_at: rangeEndAt,
+            readers: [{ mac: `reader_SALIDA_${competitionSlug}`, active: true }],
+          },
+          {
+            client_key: "finish",
+            sequence: 1,
+            name: "Meta",
+            kind: "finish",
+            location_code: "META",
+            distance_meters: Number(distance.meters) || null,
+            range_start_at: rangeStartAt,
+            range_end_at: rangeEndAt,
+            readers: [{ mac: `reader_META_${competitionSlug}`, active: true }],
+          },
+        ],
+        structured_sections: [],
+      },
+      extra_data: { source: "soporte-exotimer" },
+    };
+  });
+}
+
 function toEventFormData(event) {
   return {
     ...event,
@@ -825,21 +939,21 @@ function matchByIdOrName(list, id, name, label) {
 function applyTicketPatch(ticket, input) {
   const patch = {};
   if (input.title != null || input.ticketTitleNew != null) patch.title = String(input.title ?? input.ticketTitleNew);
-  if (input.amount != null || input.price != null) patch.amount = String(input.amount ?? input.price);
+  if (input.amount != null || input.price != null) patch.price = Number(input.amount ?? input.price);
   if (input.currency != null) patch.currency = String(input.currency).toUpperCase();
-  if (input.startDate != null) patch.startDate = String(input.startDate);
-  if (input.endDate != null || input.dateExpired != null) patch.endDate = String(input.endDate ?? input.dateExpired);
+  if (input.startDate != null) patch.starts_at = String(input.startDate);
+  if (input.endDate != null || input.dateExpired != null) patch.ends_at = String(input.endDate ?? input.dateExpired);
 
   if (Object.keys(patch).length === 0) {
     throw new Error("No hay cambios de ticket para aplicar.");
   }
 
-  if (patch.amount != null && Number(patch.amount) < 0) {
+  if (patch.price != null && patch.price < 0) {
     throw new Error("El precio del ticket no puede ser negativo.");
   }
 
   const next = { ...ticket, ...patch };
-  if (next.startDate && next.endDate && new Date(next.endDate) < new Date(next.startDate)) {
+  if (next.starts_at && next.ends_at && new Date(next.ends_at) < new Date(next.starts_at)) {
     throw new Error("La fecha de expiracion no puede ser menor que la fecha de inicio.");
   }
 
@@ -847,30 +961,20 @@ function applyTicketPatch(ticket, input) {
 }
 
 async function updateEventTicket(input) {
-  const competitionId = pickCompetitionId(input);
-  const events = await getCompetitionEvents({ competitionId });
-  const event = matchByIdOrName(events, input.eventId, input.eventName || input.distance, "evento/distancia");
-  const tickets = event.tickets || [];
+  const resolvedInput = await resolveCompetitionInput(input);
+  const competitionId = pickCompetitionId(resolvedInput);
+  const events = await getCompetitionEvents(resolvedInput);
+  const event = input.eventId || input.eventName || input.distance
+    ? matchByIdOrName(events, input.eventId, input.eventName || input.distance, "evento/distancia")
+    : null;
+  const tickets = event?.tickets || (await getTickets(resolvedInput));
   const ticket = matchByIdOrName(tickets, input.ticketId, input.ticketTitle || input.ticketName, "ticket");
   const { next, patch } = applyTicketPatch(ticket, input);
 
-  const form = events.map((item) => {
-    const eventFormData = toEventFormData(item);
-    if (String(item.id) !== String(event.id)) return eventFormData;
-
-    return {
-      ...eventFormData,
-      eventFormProps: {
-        ...eventFormData.eventFormProps,
-        tickets: tickets.map((candidate) => (String(candidate.id) === String(ticket.id) ? next : candidate)),
-      },
-    };
-  });
-
   const request = {
-    method: "POST",
-    path: "/api/competition/event/create/",
-    data: { competition: competitionId, form },
+    method: "PATCH",
+    path: `/registration/api/v1/tickets/${ticket.id}`,
+    data: patch,
   };
   const saved = await apiRequest(request);
 
@@ -879,9 +983,9 @@ async function updateEventTicket(input) {
     saved,
     changed: {
       competitionId,
-      event: { id: event.id, name: event.name },
+      event: event ? { id: event.id, name: event.name } : null,
       ticketBefore: ticket,
-      ticketAfter: next,
+      ticketAfter: normalizeTicket(saved || next),
       patch,
     },
   };
@@ -954,7 +1058,9 @@ async function createCompetitionFromBases(input = {}) {
 
   const catalogs = await getCompetitionCatalogs();
   const country = bestCatalogMatch(catalogs.countries, countryHint, (item) => item.pais || item.name || item.codigo, "pais");
-  const cityCandidates = catalogs.cities.filter((item) => !country?.id || !item.pais || String(item.pais) === String(country.id));
+  const cityCandidates = catalogs.cities.filter(
+    (item) => !country?.id || (!item.country_id && !item.pais) || String(item.country_id || item.pais) === String(country.id)
+  );
   const city = bestCatalogMatch(cityCandidates.length ? cityCandidates : catalogs.cities, cityHint, (item) => item.city || item.name, "ciudad");
   const sport = bestCatalogMatch(catalogs.sports, sportHint, (item) => item.name, "deporte");
   const organizer = bestCatalogMatch(catalogs.organizers, organizerHint, (item) => item.name, "organizador", {
@@ -1011,44 +1117,55 @@ async function createCompetitionFromBases(input = {}) {
     },
   };
 
-  const createResponse = await apiMultipartRequest({
-    path: "/api/competition/create/",
-    fields: {
+  const competitionSlug = slugify(`${competitionName}-${date}`);
+  const shouldConfigureDistances = input.configureDistances !== false;
+  const setupPayload = {
+    competition: {
       name: competitionName,
-      date,
-      country: String(country.id),
-      city: String(city.id),
-      sport: String(sport.id),
-      organizer: String(organizer.id),
+      slug: competitionSlug,
+      start_date: formatCompetitionDateTime(date, input.startTime || input.start || extracted.startTime || "08:00"),
+      country_id: Number(country.id),
+      city_id: Number(city.id),
+      sport_id: Number(sport.id),
+      status: "draft",
+      visibility: "public",
       description,
+      owners: [{ organization_id: Number(organizer.id), role: "owner", is_primary: true }],
     },
-    files: banner ? { banner } : {},
-  });
-
-  const competitionId = Array.isArray(createResponse) ? createResponse[0] : createResponse?.id || createResponse?.competition || createResponse;
+    events: shouldConfigureDistances
+      ? buildCompetitionSetupEvents({
+          competitionSlug,
+          distances,
+          date,
+          startTime: input.startTime || input.start || extracted.startTime || "08:00",
+          createCategories: input.createCategories === true,
+        })
+      : [],
+  };
+  const setupRequest = {
+    method: "POST",
+    path: "/catalog/api/v1/competitions/setup",
+    params: { create_timing_configs: true },
+    data: setupPayload,
+  };
+  const createResponse = await apiRequest(setupRequest);
+  const competitionId = createResponse?.competition?.id || createResponse?.id;
   if (!competitionId) throw new Error("ExoTimer no devolvio id de competencia creada.");
 
-  const shouldConfigureDistances = input.configureDistances !== false;
-  let eventCreateResponse = null;
-  if (shouldConfigureDistances) {
-    const form = buildSimpleDistanceEvents({
-      competitionId,
-      distances,
-      date,
-      startTime: input.startTime || input.start || extracted.startTime || "08:00",
-      createCategories: input.createCategories === true,
-    });
-    eventCreateResponse = await apiRequest({
+  let bannerResponse = null;
+  if (banner) {
+    bannerResponse = await apiMultipartRequest({
       method: "POST",
-      path: "/api/competition/event/create/",
-      data: { competition: Number(competitionId), form },
+      path: `/catalog/api/v1/competitions/${competitionId}/media/banner_url`,
+      files: { media: banner },
     });
   }
 
-  const detail = await apiRequest({ path: `/api/competition/one-event/${competitionId}` });
+  competitionCache.expiresAt = 0;
+  const detail = await apiRequest({ path: `/catalog/api/v1/competitions/${competitionId}/full` });
   let salidas = null;
   try {
-    salidas = await apiRequest({ path: `/v2/raws/config/salidas/${competitionId}/` });
+    salidas = await apiRequest({ path: `/timing/api/v1/raws/config/salidas/${competitionId}/` });
   } catch {
     salidas = null;
   }
@@ -1059,20 +1176,27 @@ async function createCompetitionFromBases(input = {}) {
     competition: {
       id: detail?.id || Number(competitionId),
       name: detail?.name || competitionName,
-      date: detail?.date || date,
-      country: detail?.country || country.pais || country.name,
-      city: detail?.city || city.city || city.name,
-      sport: detail?.sport || sport.name,
-      organizer: detail?.organizer || organizer.name,
-      config: detail?.config ?? null,
-      banner: detail?.banner || null,
+      date: detail?.start_date?.slice?.(0, 10) || date,
+      country: country.name || country.pais,
+      city: city.name || city.city,
+      sport: sport.name,
+      organizer: organizer.name,
+      config: createResponse?.timing_configs ?? null,
+      banner: detail?.banner_url || bannerResponse?.banner_url || null,
     },
     distances: distances.map((item) => item.name),
     startTime: input.startTime || input.start || extracted.startTime || "08:00",
     categoriesCreated: input.createCategories === true,
-    eventCreateResponse,
+    eventCreateResponse: createResponse,
     salidas,
     audit: {
+      request: {
+        method: setupRequest.method,
+        endpoint: setupRequest.path,
+        params: setupRequest.params,
+        payload: setupPayload,
+      },
+      response: createResponse,
       catalogs: {
         country,
         city,
@@ -1080,6 +1204,7 @@ async function createCompetitionFromBases(input = {}) {
         organizer,
       },
       usedMessageImageAsBanner: Boolean(banner),
+      bannerResponse,
     },
   };
 }
@@ -1093,11 +1218,12 @@ async function createCompetitionFromChat(input = {}) {
 }
 
 async function getInscription(input) {
-  const normalizedInput = normalizeDorsalReferences(input);
+  const normalizedInput = await resolveCompetitionInput(normalizeDorsalReferences(input));
   const request = {
-    path: "/api/inscription/detail-verify/",
+    path: "/registration/api/v1/inscriptions/detail-verify/",
     params: {
       competition: pickCompetitionId(normalizedInput),
+      competition_id: Number(pickCompetitionId(normalizedInput)),
       dorsal: normalizedInput.dorsal || normalizedInput.bib,
     },
   };
@@ -1125,15 +1251,19 @@ function pickInscriptionDocument(inscription = {}) {
 }
 
 function pickParticipant(inscription = {}) {
-  return inscription.participant && typeof inscription.participant === "object" ? inscription.participant : {};
+  if (inscription.participant && typeof inscription.participant === "object") return inscription.participant;
+  if (inscription.participant_payload && typeof inscription.participant_payload === "object") {
+    return inscription.participant_payload;
+  }
+  return {};
 }
 
 function inscriptionFullName(inscription = {}) {
   const document = pickInscriptionDocument(inscription);
   const participant = pickParticipant(inscription);
   return [
-    document.nombre || document.name || participant.name,
-    document.apellidos || document.lastname || document.lastname_mother || participant.lastname,
+    document.nombre || document.name || participant.first_name || participant.name,
+    document.apellidos || document.lastname || document.lastname_mother || participant.last_name || participant.lastname,
   ]
     .filter(Boolean)
     .join(" ")
@@ -1188,7 +1318,9 @@ function scoreInscription(inscription, terms) {
 
   if (terms.document) {
     const wanted = normalizeDigits(terms.document);
-    const current = normalizeDigits(document.dni || document.document || participant.dni);
+    const current = normalizeDigits(
+      document.dni || document.document || document.document_number || participant.dni || participant.document_number
+    );
     if (wanted && current && wanted === current) {
       score += 100;
       reasons.push("document");
@@ -1239,32 +1371,48 @@ function summarizeInscription(inscription = {}, terms = {}) {
       clean(participant.user_firebase || participant.userFirebase || participant.user_uid || participant.uid) || null,
     ticketId: ticket?.id || inscription.ticket_id || (typeof inscription.ticket === "number" ? inscription.ticket : null),
     eventId: event?.id || inscription.event_id || (typeof inscription.event === "number" ? inscription.event : null),
+    categoryId: inscription.category_id || event?.category_id || null,
+    commerceOrderId: inscription.commerce_order_id || null,
     name: inscriptionFullName(inscription) || null,
-    dni: clean(document.dni || document.document || participant.dni) || null,
+    dni: clean(
+      document.dni || document.document || document.document_number || participant.dni || participant.document_number
+    ) || null,
     email: email || null,
     phone: clean(document.phone || document.telefono || document.celular || participant.phone) || null,
-    distance: clean(document.distancia || document.distance) || null,
-    category: clean(document.categoria || document.category) || null,
-    gender: clean(document.genero || document.gender || participant.genre) || null,
-    dorsal: clean(document.dorsal || document._dorsal || document.bib) || null,
-    amount: clean(document.precio_inscripcion || document.amount || inscription.amount) || null,
+    distance: clean(inscription.event_name || document.distancia || document.distance) || null,
+    category: clean(inscription.category_name || document.categoria || document.category) || null,
+    gender: clean(inscription.gender || document.genero || document.gender || participant.gender || participant.genre) || null,
+    dorsal: clean(inscription.dorsal || document.dorsal || document._dorsal || document.bib) || null,
+    amount: clean(
+      inscription.pricing_snapshot?.total_amount ||
+        inscription.pricing_snapshot?.price ||
+        document.precio_inscripcion ||
+        document.amount ||
+        inscription.amount
+    ) || null,
     voucher: inscription.voucher || null,
-    voucherState: inscription.state_voucher ?? null,
-    coupon: inscription.cupon_usado || null,
+    voucherState: inscription.status || inscription.state_voucher || null,
+    paidAt: inscription.paid_at || null,
+    coupon: inscription.coupon_code || inscription.cupon_usado || null,
     emailMatchesExpected: expectedEmail && email ? normalizeEmail(expectedEmail) === normalizeEmail(email) : null,
     documentData: { ...document },
+    participantData: { ...participant },
   };
 }
 
 async function getInscriptionByReferenceOrDocument(input = {}) {
-  const competitionId = pickCompetitionId(input);
+  const resolvedInput = await resolveCompetitionInput(input);
+  const competitionId = pickCompetitionId(resolvedInput);
   const terms = buildInscriptionSearchTerms(input);
   if (!Object.values(terms).some(Boolean)) {
     throw new Error("Falta referencia, DNI, correo, telefono o nombre para buscar la inscripcion.");
   }
 
-  const request = { path: `/api/inscription/list/${competitionId}/` };
-  const response = await apiRequest(request);
+  const request = {
+    path: "/registration/api/v1/inscriptions/",
+    params: { competition_id: Number(competitionId), limit: 500, offset: 0 },
+  };
+  const response = await requestAllPages(request.path, { competition_id: Number(competitionId) });
   const rows = asArray(response);
   const scored = rows
     .map((row) => ({ row, ...scoreInscription(row, terms) }))
@@ -1277,7 +1425,7 @@ async function getInscriptionByReferenceOrDocument(input = {}) {
   const found = Boolean(best && !ambiguous);
 
   return {
-    ...buildAudit({ path: request.path, response: { count: rows.length, matched: scored.length } }),
+    ...buildAudit({ path: request.path, params: request.params, response: { count: rows.length, matched: scored.length } }),
     found,
     ambiguous,
     competitionId: Number(competitionId),
@@ -1310,6 +1458,14 @@ async function validatePaymentEvidence(input = {}) {
   const lookup = await getInscriptionByReferenceOrDocument(input);
   const evidence = pickPaymentEvidence(input);
   const match = lookup.bestMatch;
+  let commerceOrder = null;
+  let commercePayments = [];
+  if (match?.commerceOrderId) {
+    [commerceOrder, commercePayments] = await Promise.all([
+      apiRequest({ path: `/commerce/api/v1/orders/${match.commerceOrderId}` }).catch(() => null),
+      requestAllPages("/commerce/api/v1/orders/payments/", { order_id: Number(match.commerceOrderId) }).catch(() => []),
+    ]);
+  }
   const expectedRaw = String(match?.amount || "").replace(/[^\d.]+/g, "");
   const paidRaw = String(evidence.amount || "").replace(/[^\d.]+/g, "");
   const expectedAmount = expectedRaw ? Number(expectedRaw) : null;
@@ -1318,8 +1474,17 @@ async function validatePaymentEvidence(input = {}) {
     Number.isFinite(expectedAmount) && expectedAmount > 0 && Number.isFinite(paidAmount) && paidAmount > 0
       ? Math.abs(expectedAmount - paidAmount) < 0.01
       : null;
+  const approvedPayment = commercePayments.find((payment) =>
+    ["approved", "paid", "succeeded", "completed"].includes(normalizeText(payment.status))
+  );
+  const commercePaid = Boolean(
+    match?.paidAt ||
+      approvedPayment ||
+      ["paid", "confirmed", "completed"].includes(normalizeText(commerceOrder?.status))
+  );
   const paymentLooksValid = Boolean(
-    lookup.found && evidence.hasStrongEvidence && evidence.amount && (amountMatches === true || amountMatches === null)
+    lookup.found &&
+      (commercePaid || (evidence.hasStrongEvidence && evidence.amount && (amountMatches === true || amountMatches === null)))
   );
 
   return {
@@ -1335,14 +1500,24 @@ async function validatePaymentEvidence(input = {}) {
       paidAmount: Number.isFinite(paidAmount) ? paidAmount : null,
       emailMatchesExpected: match?.emailMatchesExpected ?? null,
       currentVoucherState: match?.voucherState ?? null,
-      requiresHumanForPaymentApproval: true,
+      commerceOrderId: match?.commerceOrderId || null,
+      commerceOrderStatus: commerceOrder?.status || null,
+      commercePaymentStatus: approvedPayment?.status || commercePayments[0]?.status || null,
+      commercePaid,
+      requiresHumanForPaymentApproval: !commercePaid,
       reason: !lookup.found
         ? "inscription_not_found"
+        : commercePaid
+          ? "payment_confirmed_by_commerce"
         : !evidence.hasStrongEvidence
           ? "weak_or_missing_payment_evidence"
           : amountMatches === false
             ? "amount_mismatch"
             : "payment_evidence_matches_inscription_but_payment_approval_is_human",
+    },
+    commerce: {
+      order: commerceOrder,
+      payments: commercePayments,
     },
     lookup,
   };
@@ -1363,14 +1538,14 @@ async function updateInscriptionEmail(input = {}) {
     ...(lookup.bestMatch.documentData || {}),
     email: nextEmail,
   };
+  const participantPayload = {
+    ...(lookup.bestMatch.participantData || {}),
+    email: nextEmail,
+  };
   const request = {
-    method: "POST",
-    path: "/api/inscription/update-admin/",
-    data: {
-      competition_id: String(lookup.competitionId),
-      pk: String(lookup.bestMatch.id),
-      document,
-    },
+    method: "PATCH",
+    path: `/registration/api/v1/inscriptions/${lookup.bestMatch.id}`,
+    data: { document, participant_payload: participantPayload },
   };
   const response = await apiRequest(request);
   return {
@@ -1388,7 +1563,7 @@ async function updateInscriptionEmail(input = {}) {
 async function getInscriptionCombineData(competitionId) {
   const request = {
     method: "GET",
-    path: `/api/competition/event/combine-data/${competitionId}/`,
+    path: `/catalog/api/v1/competitions/${competitionId}/combine-data/`,
   };
   const response = await apiRequest(request);
   return {
@@ -1406,7 +1581,8 @@ async function updateInscriptionEventCategory(input = {}) {
   const before = lookup.bestMatch;
   const combineData = await getInscriptionCombineData(lookup.competitionId);
   const combinations = combineData.combinations;
-  const distanceOptions = Object.keys(combinations);
+  const entries = normalizeCombinationEntries(combinations);
+  const distanceOptions = [...new Set(entries.map((entry) => entry.distance).filter(Boolean))];
 
   const targetField = normalizeText(input.targetField || input.field || "");
   const requestedValue = clean(input.requestedValue || input.newValue);
@@ -1441,11 +1617,24 @@ async function updateInscriptionEventCategory(input = {}) {
   const resolvedDistance = requestedDistance
     ? resolveOption(distanceOptions, requestedDistance, "distancia")
     : resolveOption(distanceOptions, before.distance, "distancia");
-  const categoryOptions = combinations[resolvedDistance.value] || [];
+  const distanceEntries = entries.filter(
+    (entry) => normalizeText(entry.distance) === normalizeText(resolvedDistance.value)
+  );
+  const categoryOptions = distanceEntries.map((entry) => entry.category);
   const resolvedCategory = requestedCategory
     ? resolveOption(categoryOptions, requestedCategory, "categoria")
     : resolveOption(categoryOptions, before.category, "categoria");
   const resolvedGender = requestedGender ? resolveGenderOption(requestedGender) : { value: before.gender, score: 100 };
+  const resolvedEntry = distanceEntries.find(
+    (entry) =>
+      normalizeText(entry.category) === normalizeText(resolvedCategory.value) &&
+      (!entry.gender ||
+        normalizeText(entry.gender) === "mixto" ||
+        normalizeText(entry.gender) === normalizeText(resolvedGender.value))
+  );
+  if (!resolvedEntry?.raw?.eventId || !resolvedEntry?.raw?.categoryId) {
+    throw new Error("No se pudieron resolver los IDs reales de evento y categoria.");
+  }
 
   const document = {
     ...(before.documentData || {}),
@@ -1455,11 +1644,14 @@ async function updateInscriptionEventCategory(input = {}) {
   };
 
   const request = {
-    method: "POST",
-    path: "/api/inscription/update-admin/",
+    method: "PATCH",
+    path: `/registration/api/v1/inscriptions/${before.id}`,
     data: {
-      competition_id: String(lookup.competitionId),
-      pk: String(before.id),
+      event_id: Number(resolvedEntry.raw.eventId),
+      event_name: resolvedDistance.value,
+      category_id: Number(resolvedEntry.raw.categoryId),
+      category_name: resolvedCategory.value,
+      gender: resolvedGender.value,
       document,
     },
   };
@@ -1490,6 +1682,8 @@ async function updateInscriptionEventCategory(input = {}) {
       distance: resolvedDistance,
       category: resolvedCategory,
       gender: resolvedGender,
+      eventId: resolvedEntry.raw.eventId,
+      categoryId: resolvedEntry.raw.categoryId,
     },
     changed: {
       competitionId: lookup.competitionId,
@@ -1514,20 +1708,6 @@ async function updateInscriptionEventCategory(input = {}) {
   };
 }
 
-async function resolveParticipantUserFirebase(inscription) {
-  if (inscription.participantUserFirebase) {
-    return { userFirebase: inscription.participantUserFirebase, audit: null };
-  }
-  if (!inscription.participantId) return { userFirebase: null, audit: null };
-
-  const request = { path: `/v3/participants/${inscription.participantId}/` };
-  const response = await apiRequest(request);
-  return {
-    userFirebase: clean(response?.participant?.user_firebase || response?.user_firebase) || null,
-    audit: buildAudit({ path: request.path, response }),
-  };
-}
-
 async function resendInscriptionConfirmation(input = {}) {
   const lookup = await getInscriptionByReferenceOrDocument(input);
   if (!lookup.found || !lookup.bestMatch) {
@@ -1535,28 +1715,18 @@ async function resendInscriptionConfirmation(input = {}) {
   }
 
   const match = lookup.bestMatch;
-  const participantResolution = await resolveParticipantUserFirebase(match);
-  const userFirebase = participantResolution.userFirebase;
-  if (!match.ticketId || !match.eventId || !userFirebase) {
-    throw new Error("No se pudo resolver ticket, evento o user_firebase para reenviar la confirmacion.");
-  }
-
-  const payload = {
-    ticket: match.ticketId,
-    participant: userFirebase,
-    event: match.eventId,
-    document: JSON.stringify(match.documentData || {}),
-  };
   const request = {
-    method: "POST",
-    path: "/api/inscription/create/",
-    data: payload,
+    method: "GET",
+    path: `/registration/api/v1/inscriptions/${match.id}/confirmation`,
   };
   const response = await apiRequest(request);
 
   return {
-    ...buildAudit({ method: request.method, path: request.path, payload, response }),
-    resent: true,
+    ...buildAudit({ method: request.method, path: request.path, response }),
+    resent: false,
+    confirmationRetrieved: true,
+    emailResent: false,
+    emailResendUnavailable: true,
     inscription: {
       id: match.id,
       competitionId: lookup.competitionId,
@@ -1566,8 +1736,8 @@ async function resendInscriptionConfirmation(input = {}) {
       email: match.email,
       name: match.name,
     },
+    confirmation: response,
     lookup,
-    participantResolution: participantResolution.audit,
   };
 }
 
@@ -1578,20 +1748,20 @@ function pickWhatsAppRecipient(input = {}, match = {}) {
 }
 
 function buildInscriptionConfirmationCaption({ match, response, competitionName }) {
-  const qrUrl = response?.qr || response?.qr_url || response?.qrUrl || null;
+  const inscription = response?.inscription || response || {};
   return [
-    `Hola ${match.name || response?.nombre || "participante"}, te compartimos la confirmacion de tu inscripcion:`,
+    `Hola ${match.name || response?.participant_name || "participante"}, te compartimos la confirmacion de tu inscripcion:`,
     "",
     `Evento: ${competitionName || match.competitionName || "Evento"}`,
-    `Participante: ${match.name || [response?.nombre, response?.apellidos].filter(Boolean).join(" ") || "No especificado"}`,
+    `Participante: ${match.name || response?.participant_name || "No especificado"}`,
     `DNI: ${match.dni || response?.dni || "No especificado"}`,
-    `Distancia: ${match.distance || response?.distancia || "No especificado"}`,
-    `Categoria: ${match.category || response?.categoria || "No especificado"}`,
-    `Genero: ${match.gender || response?.genero || "No especificado"}`,
-    `Inscripcion: #${match.id || response?.id || "No especificado"}`,
+    `Distancia: ${match.distance || inscription.event_name || "No especificado"}`,
+    `Categoria: ${match.category || inscription.category_name || "No especificado"}`,
+    `Genero: ${match.gender || inscription.gender || "No especificado"}`,
+    `Inscripcion: #${match.id || inscription.id || "No especificado"}`,
+    `Codigo de confirmacion: ${response?.confirmation_code || "No especificado"}`,
     "",
     "Presenta este QR/comprobante para validar tu inscripcion cuando sea necesario.",
-    qrUrl ? `QR: ${qrUrl}` : "",
   ].filter((line) => line !== "").join("\n");
 }
 
@@ -1599,23 +1769,28 @@ async function sendInscriptionConfirmationWhatsApp(input = {}) {
   const result = await resendInscriptionConfirmation(input);
   const match = result.lookup.bestMatch;
   const recipient = pickWhatsAppRecipient(input, match);
-  const qrUrl = result.response?.qr || result.response?.qr_url || result.response?.qrUrl;
-  if (!qrUrl) throw new Error("Exotimer no devolvio URL de QR para enviar por WhatsApp.");
+  const confirmation = result.confirmation || result.response;
+  const pdfUrl = `${config.raceline.baseUrl}/registration/api/v1/inscriptions/${match.id}/confirmation.pdf`;
 
   const caption = buildInscriptionConfirmationCaption({
     match,
-    response: result.response,
+    response: confirmation,
     competitionName: input.competitionName,
   });
-  const sent = await sendImageMessage(recipient, qrUrl, caption);
+  const sent = await sendDocumentMessage(
+    recipient,
+    pdfUrl,
+    caption,
+    `confirmacion-inscripcion-${match.id}.pdf`
+  );
 
   return {
     ...result,
     whatsappSent: true,
     whatsapp: {
       to: recipient,
-      type: "image",
-      qrUrl,
+      type: "document",
+      pdfUrl,
       caption,
       providerResponse: sent,
       providerMessageId: sent?.messages?.[0]?.id || null,
@@ -1624,17 +1799,123 @@ async function sendInscriptionConfirmationWhatsApp(input = {}) {
 }
 
 async function getResults(input) {
-  return apiRequest({
-    method: "POST",
-    path: "/v2/results/list/",
-    data: { competition_id: Number(pickCompetitionId(input)) },
+  const resolvedInput = await resolveCompetitionInput(input);
+  return requestAllPages("/timing/api/v1/results/admin/", {
+    competition_id: Number(pickCompetitionId(resolvedInput)),
   });
+}
+
+function splitDisplayName(value) {
+  const words = clean(value)?.split(/\s+/).filter(Boolean) || [];
+  if (words.length <= 1) return { name: words[0] || null, lastname: null };
+  return { name: words[0], lastname: words.slice(1).join(" ") };
+}
+
+function normalizeResultDetail(response, catalogEvent = null, startGroups = null) {
+  const row = response?.item || response?.result || asArray(response?.items || response?.results)[0] || response;
+  const participantPayload =
+    response?.participant ||
+    row?.participant_snapshot ||
+    row?.participant_snapshot_payload ||
+    row?.athlete ||
+    row?.athlete_payload ||
+    {};
+  const displayName = splitDisplayName(
+    participantPayload.display_name || row?.participant_display_name
+  );
+  const participantName =
+    participantPayload.first_name || participantPayload.name || displayName.name;
+  const participantLastname =
+    participantPayload.last_name || participantPayload.lastname || displayName.lastname;
+  const responseEvent = response?.event || {};
+  const category = responseEvent.category || {};
+  const eventName = row?.event_name || responseEvent.name || catalogEvent?.name || null;
+  const eventId = row?.event_id || responseEvent.id || catalogEvent?.id || null;
+  const legacyConfigs =
+    catalogEvent?.extra_data?.admin_form?.configs || catalogEvent?.extra_data?.configs || null;
+  const matchingStartGroup = startGroups && typeof startGroups === "object"
+    ? startGroups[String(eventId)] ||
+      Object.values(startGroups).find(
+        (group) =>
+          String(group?.event_id || group?.id || "") === String(eventId || "") ||
+          normalizeText(group?.event_name) === normalizeText(eventName)
+      )
+    : null;
+  const configs = legacyConfigs
+    ? [{ id: eventId, ...legacyConfigs }]
+    : matchingStartGroup
+      ? [{ id: eventId, salidas: matchingStartGroup.salidas || matchingStartGroup.start_waves || [] }]
+      : [];
+  const rawAssignments = asArray(row?.raw_assignments || response?.raw_assignments).map((assignment) => ({
+    id: assignment.raw_id || assignment.raw?.id || assignment.id,
+    raw_id: assignment.raw_id || assignment.raw?.id || assignment.id,
+    dorsal: assignment.raw?.dorsal || row?.dorsal,
+    chip: assignment.raw?.chip || row?.chip,
+    hour: assignment.raw?.read_at || assignment.read_at,
+    zulu: assignment.raw?.zulu_at || assignment.read_at,
+    location: assignment.raw?.location || assignment.location || assignment.name,
+    competition: row?.competition_id,
+    point_control: assignment.key || assignment.point_control,
+  }));
+
+  return {
+    ...row,
+    participant: {
+      ...participantPayload,
+      id: participantPayload.id || row?.person_id || row?.participant_snapshot_id || null,
+      name: participantName,
+      lastname: participantLastname,
+    },
+    participantName,
+    participantLastname,
+    dorsal: row?.dorsal,
+    chip: row?.chip,
+    salida: response?.salida || row?.salida,
+    tiempo_oficial: row?.official_time_ms == null ? null : formatDuration(row.official_time_ms / 1000),
+    hora_meta: row?.finish_at || null,
+    competition: row?.competition_id,
+    event: {
+      ...catalogEvent,
+      ...responseEvent,
+      id: eventId,
+      name: eventName,
+      category: {
+        ...category,
+        id: row?.category_id || category.id || null,
+        name: row?.category_name || category.name || null,
+        genre: row?.gender || category.genre || category.gender_rule || null,
+      },
+      configs,
+    },
+    raws: [...asArray(response?.raw_candidates), ...rawAssignments],
+    raws_asigments: rawAssignments,
+    raws_assignments: rawAssignments,
+  };
 }
 
 async function getResultDetail(input) {
   const ids = Array.isArray(input.resultIds) ? input.resultIds : [input.resultId || input.id].filter(Boolean);
   if (!ids.length) throw new Error("Falta resultId.");
-  return apiRequest({ path: `/v2/results/detail/${ids.map(String).join(",")}/` });
+  const response = await apiRequest({
+    path: `/timing/api/v1/results/detail/${ids.map(String).join(",")}/`,
+  });
+  const rows = asArray(response?.items || response?.results || response?.item || response?.result || response);
+  const normalized = await Promise.all(
+    rows.map(async (row, index) => {
+      const envelope = rows.length === 1 ? response : { item: row };
+      const resultRow = envelope?.item || envelope?.result || row;
+      const [catalogEvent, startGroups] = await Promise.all([
+        resultRow?.event_id
+          ? apiRequest({ path: `/catalog/api/v1/events/${resultRow.event_id}` }).catch(() => null)
+          : null,
+        resultRow?.competition_id
+          ? apiRequest({ path: `/timing/api/v1/raws/config/salidas/${resultRow.competition_id}/` }).catch(() => null)
+          : null,
+      ]);
+      return normalizeResultDetail(index === 0 ? envelope : { item: row }, catalogEvent, startGroups);
+    })
+  );
+  return normalized.length === 1 ? normalized[0] : normalized;
 }
 
 function asArray(value) {
@@ -2146,7 +2427,13 @@ async function resolveResultEventCombination(input, detail, form) {
   const resolvedGender = requested.gender ? resolveGenderOption(requested.gender) : { value: before.gender, score: 100, query: before.gender };
   const requestedCategoryIsGeneric = isGenericCategoryRequest(requested.category);
   const categoryOptions = distanceEntries
-    .filter((item) => !resolvedGender.value || !item.gender || normalizeText(item.gender) === normalizeText(resolvedGender.value))
+    .filter(
+      (item) =>
+        !resolvedGender.value ||
+        !item.gender ||
+        normalizeText(item.gender) === "mixto" ||
+        normalizeText(item.gender) === normalizeText(resolvedGender.value)
+    )
     .map((item) => item.category);
 
   let resolvedCategory = null;
@@ -2164,6 +2451,16 @@ async function resolveResultEventCombination(input, detail, form) {
   if (!resolvedCategory) {
     resolvedCategory = resolveOption(categoryOptions, before.category, "categoria");
   }
+  const resolvedEntry = distanceEntries.find(
+    (item) =>
+      normalizeText(item.category) === normalizeText(resolvedCategory.value) &&
+      (!item.gender ||
+        normalizeText(item.gender) === "mixto" ||
+        normalizeText(item.gender) === normalizeText(resolvedGender.value))
+  );
+  if (!resolvedEntry?.raw?.eventId || !resolvedEntry?.raw?.categoryId) {
+    throw new Error("No se pudieron resolver los IDs reales de evento y categoria para el resultado.");
+  }
 
   return {
     combineData,
@@ -2175,11 +2472,15 @@ async function resolveResultEventCombination(input, detail, form) {
         distances: distanceOptions,
         categories: categoryOptions,
       },
+      eventId: resolvedEntry.raw.eventId,
+      categoryId: resolvedEntry.raw.categoryId,
     },
     formPatch: {
       evento_distancia: resolvedDistance.value,
       genero: resolvedGender.value,
       categoria: resolvedCategory.value,
+      event_id: Number(resolvedEntry.raw.eventId),
+      category_id: Number(resolvedEntry.raw.categoryId),
     },
   };
 }
@@ -2196,7 +2497,7 @@ function summarizeResultDetail(detail) {
 }
 
 async function updateResultParticipant(input, mode) {
-  const normalizedInput = normalizeDorsalReferences(input);
+  const normalizedInput = await resolveCompetitionInput(normalizeDorsalReferences(input));
   const { resultId, detail } = await resolveResultForUpdate(normalizedInput);
   const form = buildResultParticipantForm({ input: normalizedInput, resultId, detail, mode });
   let resolvedEvent = null;
@@ -2206,14 +2507,51 @@ async function updateResultParticipant(input, mode) {
     Object.assign(form, resolvedEvent.formPatch);
   }
 
-  const required = ["dorsal", "participantName", "participantLastname", "evento_distancia", "genero", "categoria"];
-  const missing = required.filter((key) => isBlank(form[key]));
-  if (missing.length) throw new Error(`Faltan datos del resultado para actualizar: ${missing.join(", ")}`);
+  const participantDisplayName = [form.participantName, form.participantLastname].filter(Boolean).join(" ").trim();
+  const payload = {};
+  if (mode === "dorsal") {
+    payload.dorsal = Number(form.dorsal);
+    payload.chip = String(form.chip);
+  }
+  if (mode === "participant_data") {
+    if (!participantDisplayName) throw new Error("Falta nombre o apellido para actualizar el participante.");
+    payload.participant_display_name = participantDisplayName;
+    payload.athlete_payload = {
+      ...(detail?.athlete_payload || {}),
+      name: form.participantName || null,
+      lastname: form.participantLastname || null,
+      first_name: form.participantName || null,
+      last_name: form.participantLastname || null,
+      display_name: participantDisplayName,
+    };
+    payload.participant_snapshot_payload = {
+      ...(detail?.participant_snapshot_payload || {}),
+      first_name: form.participantName || null,
+      last_name: form.participantLastname || null,
+      display_name: participantDisplayName,
+    };
+  }
+  if (mode === "event_category") {
+    payload.event_id = Number(form.event_id);
+    payload.event_name = form.evento_distancia;
+    payload.category_id = Number(form.category_id);
+    payload.category_name = form.categoria;
+    payload.gender = form.genero;
+    payload.participant_snapshot_payload = {
+      ...(detail?.participant_snapshot_payload || {}),
+      event_id: Number(form.event_id),
+      event_name: form.evento_distancia,
+      category_id: Number(form.category_id),
+      category_name: form.categoria,
+      gender: form.genero,
+    };
+  }
+  if (!Object.keys(payload).length) throw new Error("No hay cambios de resultado para aplicar.");
 
   const request = {
-    method: "POST",
-    path: "/v2/results/update-participant/",
-    data: form,
+    method: "PATCH",
+    path: `/timing/api/v1/results/${resultId}`,
+    data: payload,
   };
   const saved = await apiRequest(request);
   const verificationDetail = firstDetail(await getResultDetail({ resultId }));
@@ -2243,7 +2581,7 @@ async function updateResultParticipant(input, mode) {
       resultId,
       mode,
       before: summarizeResultDetail(detail),
-      after: form,
+      after: payload,
     },
   };
 }
@@ -2261,7 +2599,8 @@ async function updateResultEventCategory(input) {
 }
 
 async function validatePreRace(input) {
-  const request = { path: `/v2/results/validate/${pickCompetitionId(input)}/` };
+  const resolvedInput = await resolveCompetitionInput(input);
+  const request = { path: `/timing/api/v1/results/validate/${pickCompetitionId(resolvedInput)}/` };
   const response = await apiRequest(request);
   return {
     ...buildAudit({ path: request.path, response }),
@@ -2270,16 +2609,21 @@ async function validatePreRace(input) {
 }
 
 async function getRaws(input) {
-  const request = { path: `/v2/raws/${pickCompetitionId(input)}/list/` };
-  const response = await apiRequest(request);
+  const resolvedInput = await resolveCompetitionInput(input);
+  const competitionId = pickCompetitionId(resolvedInput);
+  const request = {
+    path: `/timing/api/v1/raws/by-competition/${competitionId}/`,
+    params: { limit: 500, offset: 0 },
+  };
+  const response = await requestAllPages(request.path);
   return {
-    ...buildAudit({ path: request.path, response }),
+    ...buildAudit({ path: request.path, params: request.params, response }),
     data: response,
   };
 }
 
 async function createManualRaw(input) {
-  const normalizedInput = normalizeDorsalReferences(input);
+  const normalizedInput = await resolveCompetitionInput(normalizeDorsalReferences(input));
   const competitionId = pickCompetitionId(normalizedInput);
   const dorsal = normalizedInput.dorsal || normalizedInput.bib;
   if (!dorsal) throw new Error("Falta dorsal.");
@@ -2287,7 +2631,7 @@ async function createManualRaw(input) {
 
   const request = {
     method: "POST",
-    path: "/v2/raws/create/",
+    path: "/timing/api/v1/raws/",
     data: {
       dorsal: String(dorsal),
       chip: String(normalizedInput.chip || dorsal),
@@ -2296,7 +2640,7 @@ async function createManualRaw(input) {
       location: normalizedInput.location || "META",
       team_computer: normalizedInput.team_computer || `reader_${normalizedInput.location || "META"}_${competitionId}`,
       state: normalizedInput.state ?? false,
-      competition: Number(competitionId),
+      competition_id: Number(competitionId),
     },
   };
   const response = await apiRequest(request);
@@ -2307,20 +2651,22 @@ async function createManualRaw(input) {
 }
 
 async function updateStartTime(input) {
-  const competitionId = pickCompetitionId(input);
+  const resolvedInput = await resolveCompetitionInput(input);
+  const competitionId = pickCompetitionId(resolvedInput);
   const time = input.time || input.startTime;
   if (!/^\d{2}:\d{2}:\d{2}$/.test(String(time || ""))) {
     throw new Error("La hora debe tener formato HH:mm:ss.");
   }
 
   const request = {
-    method: "POST",
-    path: "/v2/raws/config/update/",
+    method: "PATCH",
+    path: "/timing/api/v1/configs/start-waves/time",
     data: {
       time,
       name_output: input.name_output || input.outputName || input.salida || input.startName,
       event_name: input.event_name || input.eventName || input.distance,
-      competition_id: competitionId,
+      competition_id: Number(competitionId),
+      ...(input.event_id || input.eventId ? { event_id: Number(input.event_id || input.eventId) } : {}),
     },
   };
   const response = await apiRequest(request);
@@ -2337,7 +2683,7 @@ async function editResultTime(input) {
 
   const request = {
     method: "POST",
-    path: "/v2/results/edit-times/",
+    path: "/timing/api/v1/results/edit-times/",
     data: {
       timeDateCurrent: input.timeDateCurrent,
       timeCurrent: input.timeCurrent,
@@ -2429,7 +2775,7 @@ function buildTimeCorrectionCurrent({ input, detail, finishParts }) {
 }
 
 async function applyResultTimeEvidenceCorrection(input = {}) {
-  const normalizedInput = normalizeDorsalReferences(input);
+  const normalizedInput = await resolveCompetitionInput(normalizeDorsalReferences(input));
   const competitionId = pickCompetitionId(normalizedInput);
   const { resultId, detail } = await resolveResultForUpdate(normalizedInput);
   const trustAssessment = buildAthleteEvidenceTrustAssessment(normalizedInput, detail);
@@ -2521,12 +2867,12 @@ async function applyResultTimeEvidenceCorrection(input = {}) {
       computedTimeCurrent: timeCurrent,
     },
     raw: {
-      endpoint: "/v2/raws/create/",
+      endpoint: "/timing/api/v1/raws/",
       payload: rawPayload,
       response: rawResponse,
     },
     edit: {
-      endpoint: "/v2/results/edit-times/",
+      endpoint: "/timing/api/v1/results/edit-times/",
       payload: editPayload,
       response: editResponse,
     },
@@ -2534,7 +2880,7 @@ async function applyResultTimeEvidenceCorrection(input = {}) {
 }
 
 async function getConnectedReaders() {
-  return apiRequest({ path: "/v2/computers/list/active-channels/" });
+  return apiRequest({ path: "/timing/api/v1/devices/active-channels" });
 }
 
 function createResultCorrectionCase(input) {

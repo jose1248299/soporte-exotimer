@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "test": "node --test backend/src/services/exotimerClient.test.js",
     "dev": "node --watch backend/src/server.js",
     "dev:backend": "node --watch backend/src/server.js",
     "dev:frontend": "npm --prefix frontend run dev",

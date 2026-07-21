@@ -72,7 +72,7 @@ services:
         value: "8000"
         scope: RUN_TIME
       - key: EXOTIMER_API_BASE_URL
-        value: https://raceline.app
+        value: https://dev.raceline.app
         scope: RUN_TIME
       - key: EXOTIMER_API_TOKEN
         scope: RUN_TIME

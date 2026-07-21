@@ -56,6 +56,20 @@ async function sendImageMessage(to, link, caption) {
   });
 }
 
+async function sendDocumentMessage(to, link, caption, filename = "confirmacion-inscripcion.pdf") {
+  return postMessage({
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: normalizePhone(to),
+    type: "document",
+    document: {
+      link,
+      filename,
+      ...(caption ? { caption } : {}),
+    },
+  });
+}
+
 async function getMediaUrl(mediaId) {
   assertMetaConfig();
 
@@ -88,4 +102,4 @@ async function downloadMedia(mediaId) {
   };
 }
 
-module.exports = { downloadMedia, sendImageMessage, sendTextMessage };
+module.exports = { downloadMedia, sendDocumentMessage, sendImageMessage, sendTextMessage };

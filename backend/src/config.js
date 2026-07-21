@@ -1,5 +1,12 @@
 require("dotenv").config();
 
+const raceline = {
+  baseUrl: (process.env.RACELINE_API_BASE_URL || process.env.EXOTIMER_API_BASE_URL || "").replace(/\/+$/, ""),
+  token: process.env.RACELINE_API_TOKEN || process.env.EXOTIMER_API_TOKEN,
+  email: process.env.RACELINE_API_EMAIL || process.env.EXOTIMER_API_USER,
+  password: process.env.RACELINE_API_PASSWORD || process.env.EXOTIMER_API_PASSWORD,
+};
+
 const config = {
   env: process.env.NODE_ENV || "development",
   port: Number(process.env.PORT || 4000),
@@ -29,11 +36,11 @@ const config = {
     vapidPublicKey: process.env.PUSH_VAPID_PUBLIC_KEY,
     vapidPrivateKey: process.env.PUSH_VAPID_PRIVATE_KEY,
   },
+  raceline,
+  // Backwards-compatible alias while deployments move to RACELINE_API_*.
   exotimer: {
-    baseUrl: (process.env.EXOTIMER_API_BASE_URL || "").replace(/\/+$/, ""),
-    token: process.env.EXOTIMER_API_TOKEN,
-    user: process.env.EXOTIMER_API_USER,
-    password: process.env.EXOTIMER_API_PASSWORD,
+    ...raceline,
+    user: raceline.email,
   },
 };
 

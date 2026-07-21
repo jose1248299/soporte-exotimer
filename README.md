@@ -90,9 +90,10 @@ Las acciones con riesgo quedan como `PROPOSED` y se ejecutan desde el panel de c
 - `META_GRAPH_VERSION`: version de Graph API.
 - `OPENAI_API_KEY`: activa clasificacion y respuestas IA.
 - `OPENAI_MODEL`: modelo para clasificacion/respuesta. Por compatibilidad con `finanzas-platform`, usar `gpt-4.1`.
-- `EXOTIMER_API_BASE_URL`: URL base de tu plataforma de cronometraje.
-- `EXOTIMER_API_TOKEN`: token interno para llamar endpoints propios.
-- `EXOTIMER_API_USER` y `EXOTIMER_API_PASSWORD`: credenciales de servicio para renovar token de Exotimer cuando expire.
+- `RACELINE_API_BASE_URL`: gateway de los microservicios Race Line, por ejemplo `https://dev.raceline.app`.
+- `RACELINE_API_EMAIL` y `RACELINE_API_PASSWORD`: cuenta de servicio de Identity usada para obtener el Bearer JWT.
+- `RACELINE_API_TOKEN`: token opcional; las credenciales son preferibles porque permiten renovar la sesion ante un `401`.
+- `EXOTIMER_API_BASE_URL`, `EXOTIMER_API_TOKEN`, `EXOTIMER_API_USER` y `EXOTIMER_API_PASSWORD`: aliases legacy aceptados durante la migracion.
 - `PUBLIC_BASE_URL`: URL publica del servicio.
 
 ## Despliegue en DigitalOcean Apps
