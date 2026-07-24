@@ -54,11 +54,38 @@ function isTimerCompetitionCreationRequest(text) {
   return /(crear|crea|creame|configur|alta|nuevo|nueva).{0,50}(competencia|evento|distancia|carrera)|competencia.{0,50}(imagen|afiche|bases|crear|configur)|evento.{0,50}(imagen|afiche|bases|crear|configur)|bases.{0,50}(competencia|evento|crear)/.test(lower);
 }
 
+function isExplicitCompetitionSetupConfirmation(text) {
+  const lower = normalizeForIntent(text).trim();
+  if (!lower) return false;
+  if (/\b(no|cancelar|cancela|deten|espera|todavia no|aun no)\b/.test(lower)) {
+    return false;
+  }
+  return /\b(confirmo|confirmado|procede|proceder|crea|crear|aplica|aplicar|adelante|dale|hazlo)\b/.test(
+    lower
+  );
+}
+
 function isTimerCompetitionCreationContext({ text, previousClassification, history = [] } = {}) {
   if (isTimerCompetitionCreationRequest(text)) return true;
+  if (
+    history.slice(-6).some((message) => {
+      const extracted = message.mediaAnalysis?.extracted || {};
+      return Boolean(
+        ["IMAGE", "DOCUMENT"].includes(message.contentType) &&
+          (extracted.competitionName ||
+            extracted.eventName ||
+            extracted.events?.length ||
+            extracted.distances?.length)
+      );
+    })
+  ) {
+    return true;
+  }
   const previousAction = previousClassification?.action;
   const previousIntent = normalizeForIntent(previousClassification?.intent || previousClassification?.summary);
   if (
+    previousAction === "EXOTIMER_PREVIEW_COMPETITION_SETUP" ||
+    previousAction === "EXOTIMER_APPLY_COMPETITION_SETUP" ||
     previousAction === "EXOTIMER_CREATE_COMPETITION_FROM_BASES" ||
     previousAction === "EXOTIMER_CREATE_COMPETITION_FROM_CHAT" ||
     previousIntent.includes("competition_creation") ||
@@ -85,6 +112,8 @@ function heuristicClassify(text, forcedTimer) {
         confidence: 0.9,
         intent: "timer_competition_creation_guidance",
         summary: "Timer solicita ayuda para crear o configurar competencia/evento.",
+        action: "EXOTIMER_PREVIEW_COMPETITION_SETUP",
+        actionInput: { message: text },
         needsHuman: false,
       };
     }
@@ -174,10 +203,42 @@ async function classifyMessage({
   const timerCreationContext = forcedTimer
     ? isTimerCompetitionCreationContext({ text, previousClassification, history })
     : false;
+  const previousCompetitionPlan = previousClassification?.actionInput?.plan;
+  if (
+    forcedTimer &&
+    previousCompetitionPlan?.readyToApply &&
+    isExplicitCompetitionSetupConfirmation(text)
+  ) {
+    return {
+      ...fallbackClassification,
+      userType: "TIMER",
+      confidence: 1,
+      intent: "timer_competition_creation_apply",
+      summary: "Timer confirmo aplicar el plan validado de la competencia.",
+      action: "EXOTIMER_APPLY_COMPETITION_SETUP",
+      actionInput: {
+        plan: previousCompetitionPlan,
+        confirmed: true,
+      },
+      needsHuman: false,
+    };
+  }
   if (forcedTimer && !timerCreationContext) return heuristicClassify(text, true);
 
   const client = getClient();
-  if (!client) return heuristicClassify(text, false);
+  if (!client && forcedTimer && timerCreationContext) {
+    return {
+      ...fallbackClassification,
+      userType: "TIMER",
+      confidence: 0.85,
+      intent: "timer_competition_creation_preview",
+      summary: "Timer solicita preparar una competencia desde datos o archivos adjuntos.",
+      action: "EXOTIMER_PREVIEW_COMPETITION_SETUP",
+      actionInput: { message: text },
+      needsHuman: false,
+    };
+  }
+  if (!client) return heuristicClassify(text, forcedTimer);
 
   const prompt = [
     `Clasifica un mensaje entrante por ${channel === "EXOTIMER" ? "el chat interno de ExoTimer" : "WhatsApp"} para Finisher Data, empresa de cronometraje electronico deportivo.`,
@@ -213,6 +274,7 @@ async function classifyMessage({
     "- Conserva detectedDorsals y detectedAthletes previos del contexto, agregando nuevos sin perder los anteriores.",
     "- Usa action=null si faltan ids o datos esenciales.",
     "- Puedes usar EXOTIMER_FIND_COMPETITION si el usuario da nombre de competencia pero no id.",
+    "- Para crear una competencia nueva, tanto TIMER como SYSTEM_USER deben usar primero EXOTIMER_PREVIEW_COMPETITION_SETUP. Solo despues de un preview listo y confirmacion explicita usa EXOTIMER_APPLY_COMPETITION_SETUP con el mismo objeto plan y confirmed=true.",
     "- Si el usuario da nombre de competencia y dorsal para resultados, puedes devolver EXOTIMER_GET_INSCRIPTION con competitionName y dorsal; el sistema resolvera competitionId.",
     "- No ejecutes cambios tecnicos genericos, raws manuales libres ni tickets sin confirmacion humana: usa la accion, pero needsHuman=true.",
     "- Para cambios de TIEMPO de carrera de atletas, usa EXOTIMER_CREATE_RESULT_CORRECTION_CASE o humano solo cuando falten señales minimas. Se permite TRUST_ATHLETE_EVIDENCE para ser mas credulo con evidencia combinada razonable.",
@@ -238,16 +300,25 @@ async function classifyMessage({
     "- Si el usuario no recibio el correo de confirmacion y tienes competitionId o competitionName mas referencia/DNI/email/telefono/nombre, usa EXOTIMER_RESEND_INSCRIPTION_CONFIRMATION para verificar y recuperar su confirmacion. La API nueva no reenvia correos: no afirmes que el email fue reenviado; ofrece enviar el comprobante por WhatsApp.",
     "- Si el usuario pide recibir el comprobante, QR o confirmacion por WhatsApp, usa EXOTIMER_SEND_INSCRIPTION_CONFIRMATION_WHATSAPP con competitionId y los datos de busqueda disponibles. Usa needsHuman=false si hay una unica inscripcion clara por DNI, email, telefono o referencia.",
     forcedTimer
-      ? "- Para TIMER que pide crear/configurar competencia desde bases, afiche o imagen, usa EXOTIMER_CREATE_COMPETITION_FROM_BASES si tienes nombre, fecha, ciudad y distancias. Esta accion requiere confirmacion: usa needsHuman=true salvo que el Timer confirme explicitamente la creacion."
+      ? "- Para TIMER que pide crear/configurar una competencia, usa primero EXOTIMER_PREVIEW_COMPETITION_SETUP. El preview no escribe datos: analiza chat, afiche o PDF, resuelve catalogos, detecta duplicados y prepara competencia, eventos, categorias, timing, tickets, pagos y archivos."
       : "",
     forcedTimer
-      ? "- Para TIMER que pide crear/configurar competencia con datos escritos directamente en la conversacion, usa EXOTIMER_CREATE_COMPETITION_FROM_CHAT si tienes nombre, fecha, ciudad y distancias. Esta accion requiere confirmacion: usa needsHuman=true salvo que el Timer confirme explicitamente la creacion."
+      ? "- Para EXOTIMER_PREVIEW_COMPETITION_SETUP extrae y conserva todo lo disponible: competitionName, eventDate, startTime, endTime, venueName, city, country, sport, organizer, status, visibility, registrationDeadline, events, categories, tickets, payment, website, rulesSummary y waveSize. No inventes valores ilegibles."
       : "",
     forcedTimer
-      ? "- Para EXOTIMER_CREATE_COMPETITION_FROM_BASES y EXOTIMER_CREATE_COMPETITION_FROM_CHAT extrae: competitionName, eventDate en YYYY-MM-DD si puedes, city, country, sport, organizer, distances como array, startTime, website, allowUnassignedOrganizer, createCategories=false si pide dejar categorias para despues, useMessageImageAsBanner=true solo cuando la imagen es el afiche o bases."
+      ? "- Estructura events como [{name,distanceMeters,startTime,venueName,categories:[{name,genderRule,minAge,maxAge}],waveSize}]. Estructura tickets como [{title,price,currency,status,eventName,categoryNames,teamSize,startsAt,endsAt}]. Estructura payment como {type,bank,account,cci,details}."
       : "",
     forcedTimer
-      ? "- Si el Timer confirma explicitamente crear la competencia ya resumida, conserva la misma accion y actionInput anterior sin degradar valores ya normalizados, agrega confirmed=true y usa needsHuman=false."
+      ? "- Si los tickets distinguen niveles como Open y Pro, las categorias del evento tambien deben distinguirlos. Para duplas Open/Pro con HH, MM y Mixto crea OPEN HH, OPEN MM, OPEN MIXTA, PRO HH, PRO MM y PRO MIXTA; vincula cada ticket con categoryNames=['OPEN'] o ['PRO']."
+      : "",
+    forcedTimer
+      ? "- Si el preview devuelve readyToApply=true, resume el plan y pide confirmacion explicita. No uses EXOTIMER_APPLY_COMPETITION_SETUP en el mismo turno del preview."
+      : "",
+    forcedTimer
+      ? "- Cuando el Timer responda confirmo, crear, procede o equivalente sobre un preview listo, cambia a EXOTIMER_APPLY_COMPETITION_SETUP, conserva plan completo sin modificarlo, agrega confirmed=true y usa needsHuman=false. Nunca reconstruyas ni resumas el objeto plan."
+      : "",
+    forcedTimer
+      ? "- EXOTIMER_CREATE_COMPETITION_FROM_BASES y EXOTIMER_CREATE_COMPETITION_FROM_CHAT quedan solo para compatibilidad con conversaciones antiguas. No los elijas en conversaciones nuevas."
       : "",
     forcedTimer
       ? "- Si el organizador falta y el Timer autoriza Sin Asignar, usa organizer='Sin Asignar' y allowUnassignedOrganizer=true. Si no lo autoriza, pide organizador o autorizacion para Sin Asignar."
@@ -354,8 +425,9 @@ async function composeReply({
             "Si contextActionResult.followUpResolution.type es RESULT_TIME_UPDATED_DORSAL_PENDING, informa que el tiempo ya figura actualizado, pero que el dorsal visible aun queda pendiente de revision. Menciona el dorsal actual y el dorsal solicitado.",
             "Si se ejecuto EXOTIMER_RESEND_INSCRIPTION_CONFIRMATION, informa que verificaste la inscripcion, aclara que la API nueva no permite reenviar el email y ofrece enviar el comprobante por WhatsApp. Nunca afirmes que el correo fue reenviado.",
             "Si se ejecuto EXOTIMER_SEND_INSCRIPTION_CONFIRMATION_WHATSAPP, informa que el comprobante PDF con su codigo de confirmacion fue enviado por WhatsApp y que puede revisarlo en este chat.",
-            "Si actionPending.action es EXOTIMER_CREATE_COMPETITION_FROM_BASES o EXOTIMER_CREATE_COMPETITION_FROM_CHAT, resume nombre, fecha, ciudad, deporte, organizador, distancias, hora de partida, categorias e inscripciones; pide confirmacion explicita para crearla en produccion.",
-            "Si actionResult.created y classification.action es EXOTIMER_CREATE_COMPETITION_FROM_BASES o EXOTIMER_CREATE_COMPETITION_FROM_CHAT, informa el ID de competencia, distancias creadas y salidas verificadas.",
+            "Si classification.action es EXOTIMER_PREVIEW_COMPETITION_SETUP y actionResult.preview=true, resume nombre, fecha, estado, sede, organizador, eventos, categorias, tickets, precios, pago y archivos. Si readyToApply=true pide una confirmacion explicita para aplicar exactamente ese plan. Si es false, pide solo missingFields y explica duplicados o warnings importantes.",
+            "Si classification.action es EXOTIMER_APPLY_COMPETITION_SETUP y actionResult.complete=true, informa el competitionId y confirma que competencia, eventos, categorias, timing, tickets, pagos y archivos fueron verificados. Si needsRepair=true, no afirmes que termino: informa el competitionId, los pasos fallidos y que el flujo puede reanudarse sin duplicar.",
+            "Para las acciones antiguas EXOTIMER_CREATE_COMPETITION_FROM_BASES y EXOTIMER_CREATE_COMPETITION_FROM_CHAT conserva el mismo criterio: solo confirma exito si actionResult.complete=true.",
             channel === "EXOTIMER"
               ? "Si la consulta es informativa, responde como asistente operativo usando el manual y contexto de ExoTimer. Si se ejecuto una accion, resume que se hizo y que debe revisar el usuario."
               : "",
@@ -399,7 +471,7 @@ async function analyzeImageEvidence({ buffer, mimeType, caption, conversationCon
       {
         role: "system",
         content:
-          "Analiza imagenes enviadas como evidencia o bases/afiche para soporte de cronometraje deportivo. Devuelve JSON estricto, breve y util. No inventes datos ilegibles. Si la imagen es afiche/bases de evento, extrae nombre del evento, fecha, ciudad/pais si aparecen o son razonablemente inferibles por texto principal, distancias, web/contacto, deporte y organizador si aparecen. Para capturas GPS/Strava/Garmin, distingue hora de inicio de actividad (activityStartDateTime) de hora de meta/llegada (evidenceFinishDateTime). Marca hasStrongEvidence=true si la imagen muestra nombre compatible o contexto claro, fecha/lugar compatibles, distancia coherente y tiempo/duracion del reclamo con confidence >= 0.85, aunque no sea una fuente oficial. Si la imagen solo aporta una pieza parcial fuerte, por ejemplo dorsal visible en meta/salida o GPS con tiempo, explicalo en evidenceSummary para que el hilo completo pueda usarse bajo TRUST_ATHLETE_EVIDENCE.",
+          "Analiza imagenes enviadas como evidencia o bases/afiche para soporte de cronometraje deportivo. Devuelve JSON estricto, breve y util. No inventes datos ilegibles. Si la imagen es afiche/bases de evento, extrae nombre, fecha, sede, ciudad/pais, deporte, organizador, modalidades/eventos, categorias, tickets con precios numericos, cierre de inscripciones y datos de pago. Para equipos conserva teamSize. Para capturas GPS/Strava/Garmin, distingue hora de inicio de actividad (activityStartDateTime) de hora de meta/llegada (evidenceFinishDateTime). Marca hasStrongEvidence=true si la imagen muestra nombre compatible o contexto claro, fecha/lugar compatibles, distancia coherente y tiempo/duracion del reclamo con confidence >= 0.85, aunque no sea una fuente oficial. Si la imagen solo aporta una pieza parcial fuerte, explicalo en evidenceSummary para que el hilo completo pueda usarse bajo TRUST_ATHLETE_EVIDENCE.",
       },
       {
         role: "user",
@@ -425,6 +497,44 @@ async function analyzeImageEvidence({ buffer, mimeType, caption, conversationCon
                   distances: [],
                   website: null,
                   startTime: null,
+                  endTime: null,
+                  venueName: null,
+                  registrationDeadline: null,
+                  runningDistanceMeters: null,
+                  waveSize: null,
+                  events: [
+                    {
+                      name: null,
+                      distanceMeters: null,
+                      categories: [
+                        {
+                          name: null,
+                          genderRule: null,
+                          minAge: null,
+                          maxAge: null,
+                        },
+                      ],
+                    },
+                  ],
+                  tickets: [
+                    {
+                      title: null,
+                      price: null,
+                      currency: "PEN",
+                      eventName: null,
+                      categoryNames: [],
+                      teamSize: 1,
+                    },
+                  ],
+                  payment: {
+                    type: null,
+                    bank: null,
+                    account: null,
+                    cci: null,
+                    details: null,
+                  },
+                  rulesSummary: null,
+                  workoutOrder: [],
                   time: null,
                   evidenceFinishTime: null,
                   evidenceFinishDateTime: null,
@@ -458,7 +568,138 @@ async function analyzeImageEvidence({ buffer, mimeType, caption, conversationCon
   };
 }
 
+async function analyzeDocumentEvidence({
+  buffer,
+  mimeType,
+  filename,
+  caption,
+  conversationContext,
+}) {
+  const client = getClient();
+  if (!client || !buffer) return null;
+  if (
+    !String(mimeType || "").includes("pdf") &&
+    !String(filename || "").toLowerCase().endsWith(".pdf")
+  ) {
+    return {
+      summary: "Documento recibido. El analisis estructurado admite reglamentos y bases en PDF.",
+      extracted: {},
+      relevance: "media",
+      confidence: 0.2,
+    };
+  }
+  if (Buffer.byteLength(buffer) > 20 * 1024 * 1024) {
+    return {
+      summary: "El PDF fue recibido, pero excede el tamano permitido para el analisis automatico.",
+      extracted: {},
+      relevance: "media",
+      confidence: 0,
+    };
+  }
+
+  const expectedJson = {
+    summary: "resumen breve del documento",
+    visibleText: ["datos relevantes"],
+    extracted: {
+      competitionName: null,
+      eventDate: null,
+      startTime: null,
+      endTime: null,
+      venueName: null,
+      city: null,
+      country: null,
+      sport: null,
+      organizer: null,
+      website: null,
+      registrationDeadline: null,
+      runningDistanceMeters: null,
+      waveSize: null,
+      events: [
+        {
+          name: null,
+          distanceMeters: null,
+          startTime: null,
+          venueName: null,
+          categories: [
+            {
+              name: null,
+              genderRule: "Masculino|Femenino|Mixto",
+              minAge: null,
+              maxAge: null,
+            },
+          ],
+        },
+      ],
+      tickets: [
+        {
+          title: null,
+          price: null,
+          currency: "PEN",
+          eventName: null,
+          categoryNames: [],
+          teamSize: 1,
+          startsAt: null,
+          endsAt: null,
+        },
+      ],
+      payment: {
+        type: null,
+        bank: null,
+        account: null,
+        cci: null,
+        details: null,
+      },
+      rulesSummary: null,
+      workoutOrder: [],
+    },
+    assumptions: [],
+    warnings: [],
+    relevance: "alta|media|baja",
+    confidence: 0,
+  };
+  const response = await client.responses.create({
+    model: config.openai.model,
+    instructions:
+      "Analiza reglamentos, bases y brochures de eventos deportivos para configurar Race Line. Devuelve JSON estricto. Extrae solo datos presentes o inferencias muy seguras y coloca toda inferencia en assumptions. Las modalidades competitivas son eventos; los segmentos internos de una prueba no son tickets. Si OPEN y PRO aparecen descritos como categorias o divisiones de una modalidad Individual, conserva un solo evento INDIVIDUAL y crea OPEN/PRO por genero como categorias, no eventos separados. Conserva categorias por genero, tickets solo con precios numericos reales, vigencia, datos bancarios, sede y reglas operativas. No inventes organizador, precio, cuenta ni categoria.",
+    input: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: JSON.stringify({
+              caption,
+              conversationContext,
+              expectedJson,
+            }),
+          },
+          {
+            type: "input_file",
+            filename: filename || "bases-evento.pdf",
+            file_data: `data:${mimeType || "application/pdf"};base64,${Buffer.from(
+              buffer
+            ).toString("base64")}`,
+          },
+        ],
+      },
+    ],
+  });
+
+  const parsed = parseJson(response.output_text);
+  return (
+    parsed || {
+      summary:
+        response.output_text?.trim() ||
+        "Documento recibido para configurar el evento.",
+      extracted: {},
+      relevance: "media",
+      confidence: 0.4,
+    }
+  );
+}
+
 module.exports = {
+  analyzeDocumentEvidence,
   analyzeImageEvidence,
   classifyMessage,
   composeReply,

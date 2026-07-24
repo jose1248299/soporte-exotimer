@@ -1,3 +1,4 @@
+const crypto = require("node:crypto");
 const config = require("../config");
 const prisma = require("../lib/prisma");
 const { normalizeDorsal, normalizeDorsalReferences } = require("../utils/dorsal");
@@ -134,6 +135,18 @@ const ACTIONS = {
     roles: ["TIMER"],
     risk: SAFE_READ,
     description: "Consulta readers/canales activos.",
+  },
+  EXOTIMER_PREVIEW_COMPETITION_SETUP: {
+    roles: ["TIMER"],
+    risk: SAFE_READ,
+    description:
+      "Analiza bases, afiches o datos escritos y prepara un plan validado de competencia, categorias, timing, tickets, pagos y archivos sin crear recursos.",
+  },
+  EXOTIMER_APPLY_COMPETITION_SETUP: {
+    roles: ["TIMER"],
+    risk: NEEDS_CONFIRMATION,
+    description:
+      "Aplica un plan previamente validado y confirmado, creando competencia, categorias, timing, tickets, pagos y archivos con verificacion final.",
   },
   EXOTIMER_CREATE_COMPETITION_FROM_BASES: {
     roles: ["TIMER"],
@@ -991,6 +1004,986 @@ async function updateEventTicket(input) {
   };
 }
 
+const COMPETITION_PLAN_VERSION = 1;
+
+function planNumber(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const normalized = String(value).replace(/[^\d.,-]/g, "").replace(",", ".");
+  const number = Number(normalized);
+  return Number.isFinite(number) ? number : null;
+}
+
+function normalizePlanGender(value, categoryName = "") {
+  const normalized = normalizeText(value || categoryName);
+  if (
+    ["f", "fem", "female", "femenino", "mujer", "mujeres", "mm"].includes(normalized) ||
+    /\b(mm|femenin|mujer|damas)\b/.test(normalized)
+  ) {
+    return "Femenino";
+  }
+  if (
+    ["m", "masc", "male", "masculino", "hombre", "hombres", "hh"].includes(normalized) ||
+    /\b(hh|masculin|hombre|varones)\b/.test(normalized)
+  ) {
+    return "Masculino";
+  }
+  return "Mixto";
+}
+
+function normalizePlanMeters(value, fallbackName) {
+  if (value !== undefined && value !== null && value !== "") {
+    const text = String(value).replace(",", ".");
+    const numeric = Number(text.replace(/[^\d.]/g, ""));
+    if (Number.isFinite(numeric)) {
+      if (/\bkm\b|\bk\b/i.test(text)) return Math.round(numeric * 1000);
+      return Math.round(numeric);
+    }
+  }
+  return Number(normalizeDistance(fallbackName)?.meters || 0);
+}
+
+function normalizePlanCategory(value, sportId) {
+  const source = typeof value === "string" ? { name: value } : value || {};
+  const name = clean(source.name || source.category || source.categoria || source.title);
+  if (!name) return null;
+  const genderRule = normalizePlanGender(
+    source.genderRule ||
+      source.gender_rule ||
+      source.gender ||
+      source.genre,
+    name
+  );
+  return {
+    key: `${slugify(name)}-${slugify(genderRule)}`,
+    name,
+    genderRule,
+    minAge: planNumber(source.min_age ?? source.minAge),
+    maxAge: planNumber(source.max_age ?? source.maxAge),
+    description: clean(source.description) || null,
+    sportId: Number(source.sport_id || source.sportId || sportId),
+  };
+}
+
+function normalizePlanEvents({ input, extracted, sportId, date, startTime, venueName }) {
+  const sourceEvents =
+    input.events ||
+    input.eventDefinitions ||
+    input.modalities ||
+    extracted.events ||
+    extracted.eventDefinitions ||
+    extracted.modalities;
+  const distanceSource =
+    input.distances ||
+    input.distanceOptions ||
+    input.distance ||
+    input.distancia ||
+    extracted.distances ||
+    extracted.distanceOptions ||
+    extracted.distance;
+  const eventRows = Array.isArray(sourceEvents)
+    ? sourceEvents
+    : sourceEvents
+      ? [sourceEvents]
+      : Array.isArray(distanceSource)
+        ? distanceSource
+        : cleanList(distanceSource);
+  const globalCategories = Array.isArray(input.categories || extracted.categories)
+    ? input.categories || extracted.categories
+    : [];
+  const defaultMeters = planNumber(
+    input.runningDistanceMeters ||
+      input.totalDistanceMeters ||
+      extracted.runningDistanceMeters ||
+      extracted.totalDistanceMeters
+  );
+
+  return eventRows
+    .map((value, index) => {
+      const source = typeof value === "string" ? { name: value } : value || {};
+      const name = clean(
+        source.name ||
+          source.eventName ||
+          source.distance ||
+          source.distancia ||
+          source.modality
+      );
+      if (!name) return null;
+      const key =
+        slugify(source.clientKey || source.client_key || name) || `event-${index + 1}`;
+      const categoriesSource = Array.isArray(source.categories)
+        ? source.categories
+        : globalCategories.filter((category) => {
+            const eventName = clean(
+              category?.eventName || category?.event || category?.distance
+            );
+            return !eventName || normalizeText(eventName) === normalizeText(name);
+          });
+      const categories = categoriesSource
+        .map((category) => normalizePlanCategory(category, sportId))
+        .filter(Boolean);
+      if (!categories.length && input.createCategories === true) {
+        categories.push(
+          normalizePlanCategory(
+            { name: `${name} GENERAL`, gender: "Mixto" },
+            sportId
+          )
+        );
+      }
+
+      return {
+        key,
+        name,
+        startAt:
+          source.startAt ||
+          source.start_at ||
+          formatCompetitionDateTime(date, source.startTime || startTime),
+        distanceMeters:
+          normalizePlanMeters(
+            source.distanceMeters ??
+              source.distance_meters ??
+              source.meters ??
+              source.distanceKm ??
+              source.km,
+            name
+          ) ||
+          defaultMeters ||
+          null,
+        venueName:
+          clean(
+            source.venueName ||
+              source.venue_name ||
+              source.venue ||
+              venueName
+          ) || null,
+        maxParticipants: planNumber(
+          source.maxParticipants ?? source.max_participants
+        ),
+        categories,
+        routeName: clean(
+          source.routeName || source.route || "Circuito principal"
+        ),
+        timingEnabled: source.timingEnabled !== false,
+        waveSize: planNumber(
+          source.waveSize || source.wave_size || extracted.waveSize
+        ),
+      };
+    })
+    .filter(Boolean);
+}
+
+function normalizeTicketRows(value) {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== "object") return [];
+  return Object.entries(value).map(([title, details]) =>
+    typeof details === "object" && details !== null
+      ? { title, ...details }
+      : { title, price: details }
+  );
+}
+
+function normalizeTicketPlanStatus(value) {
+  const normalized = normalizeText(value || "active");
+  if (["activo", "activa", "active"].includes(normalized)) return "active";
+  if (["borrador", "draft"].includes(normalized)) return "draft";
+  if (["pausado", "pausada", "paused"].includes(normalized)) return "paused";
+  if (["cerrado", "cerrada", "closed"].includes(normalized)) return "closed";
+  return "active";
+}
+
+function normalizePlanTickets({ input, extracted, events, salesEnd }) {
+  const rows = normalizeTicketRows(
+    input.tickets ||
+      input.registrationTickets ||
+      input.prices ||
+      extracted.tickets ||
+      extracted.registrationTickets ||
+      extracted.prices
+  );
+  return rows
+    .map((value, index) => {
+      const source = typeof value === "string" ? { title: value } : value || {};
+      const title = clean(
+        source.title || source.name || source.ticketName || source.label
+      );
+      const price = planNumber(source.price ?? source.amount ?? source.value);
+      if (!title || price === null) return null;
+      const eventHint = clean(
+        source.eventName || source.event || source.distance || source.modality
+      );
+      const event =
+        events.find(
+          (item) =>
+            item.key === source.eventKey ||
+            normalizeText(item.name) === normalizeText(eventHint) ||
+            (eventHint &&
+              normalizeText(item.name).includes(normalizeText(eventHint)))
+        ) || (events.length === 1 ? events[0] : null);
+      const categoryNames = cleanList(
+        source.categoryNames ||
+          source.categories ||
+          source.category ||
+          source.level ||
+          source.division
+      );
+      const teamSize =
+        planNumber(source.teamSize || source.team_size || source.participants) || 1;
+      return {
+        key: slugify(source.key || title) || `ticket-${index + 1}`,
+        title,
+        price,
+        affiliatedPrice: planNumber(
+          source.affiliatedPrice ?? source.affiliated_price
+        ),
+        currency: clean(
+          source.currency || input.currency || extracted.currency || "PEN"
+        ).toUpperCase(),
+        status: normalizeTicketPlanStatus(
+          source.status || input.ticketStatus
+        ),
+        startsAt:
+          source.startsAt ||
+          source.starts_at ||
+          input.salesStart ||
+          extracted.salesStart ||
+          null,
+        endsAt: source.endsAt || source.ends_at || salesEnd || null,
+        maxQuantity: planNumber(
+          source.maxQuantity ?? source.max_quantity
+        ),
+        eventKey: event?.key || null,
+        eventName: event?.name || eventHint || null,
+        categoryNames,
+        teamSize,
+        metadata: {
+          source: "soporte-exotimer",
+          participation_type: teamSize > 1 ? "team" : "individual",
+          team_size: teamSize,
+          ...(source.metadata || source.metadata_json || {}),
+        },
+      };
+    })
+    .filter(Boolean);
+}
+
+function alignTieredCompetitionCategories(events, tickets, warnings) {
+  for (const event of events) {
+    const eventTickets = tickets.filter(
+      (ticket) => ticket.eventKey === event.key
+    );
+    const openTickets = eventTickets.filter((ticket) =>
+      /\bopen\b/.test(normalizeText(ticket.title))
+    );
+    const proTickets = eventTickets.filter((ticket) =>
+      /\bpro\b/.test(normalizeText(ticket.title))
+    );
+    if (!openTickets.length || !proTickets.length) continue;
+    const categoriesAlreadyTiered = event.categories.some((category) =>
+      /\b(open|pro)\b/.test(normalizeText(category.name))
+    );
+    if (categoriesAlreadyTiered || !event.categories.length) continue;
+
+    event.categories = ["OPEN", "PRO"].flatMap((level) =>
+      event.categories.map((category) => {
+        const suffix =
+          category.genderRule === "Masculino"
+            ? "HH"
+            : category.genderRule === "Femenino"
+              ? "MM"
+              : "MIXTA";
+        return {
+          ...category,
+          key: `${slugify(level)}-${slugify(suffix)}-${slugify(
+            category.genderRule
+          )}`,
+          name: `${level} ${suffix}`,
+        };
+      })
+    );
+    for (const ticket of openTickets) ticket.categoryNames = ["OPEN"];
+    for (const ticket of proTickets) ticket.categoryNames = ["PRO"];
+    warnings.push(
+      `Se separaron automaticamente las categorias Open y Pro de ${event.name} usando sus divisiones por genero.`
+    );
+  }
+}
+
+function normalizePaymentPlan(input, extracted) {
+  const rawSource =
+    input.payment ||
+    input.paymentDetails ||
+    extracted.payment ||
+    extracted.paymentDetails ||
+    {};
+  const source =
+    rawSource && typeof rawSource === "object" ? rawSource : {};
+  const bank = clean(
+    input.bank ||
+      input.bankName ||
+      source.bank ||
+      source.bankName ||
+      extracted.bank ||
+      extracted.bankName
+  );
+  const account = clean(
+    input.bankAccount ||
+      input.account ||
+      source.account ||
+      source.bankAccount ||
+      extracted.bankAccount ||
+      extracted.account
+  );
+  const cci = clean(input.cci || source.cci || extracted.cci);
+  const explicitDetails = clean(
+    input.paymentsDetails ||
+      input.payments_details ||
+      (typeof input.paymentDetails === "string"
+        ? input.paymentDetails
+        : null) ||
+      source.details ||
+      source.paymentsDetails ||
+      (typeof extracted.paymentDetails === "string"
+        ? extracted.paymentDetails
+        : null) ||
+      extracted.paymentsDetails
+  );
+  const lines = [
+    bank,
+    account ? `Cuenta: ${account}` : null,
+    cci ? `CCI: ${cci}` : null,
+  ].filter(Boolean);
+  const requestedType = normalizeText(
+    clean(
+      input.paymentType ||
+        input.typePay ||
+        source.type ||
+        extracted.paymentType ||
+        (lines.length ? "voucher" : null)
+    )
+  );
+  return {
+    type: ["transfer", "transferencia", "bank_transfer"].includes(
+      requestedType
+    )
+      ? "voucher"
+      : requestedType || null,
+    bank,
+    account,
+    cci,
+    details: explicitDetails || lines.join("\n") || null,
+  };
+}
+
+function stablePlanValue(value) {
+  if (Array.isArray(value)) return value.map(stablePlanValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .filter(
+          (key) =>
+            ![
+              "fingerprint",
+              "duplicates",
+              "warnings",
+              "missingFields",
+              "readyToApply",
+            ].includes(key)
+        )
+        .map((key) => [key, stablePlanValue(value[key])])
+    );
+  }
+  return value;
+}
+
+function fingerprintCompetitionPlan(plan) {
+  return crypto
+    .createHash("sha256")
+    .update(JSON.stringify(stablePlanValue(plan)))
+    .digest("hex")
+    .slice(0, 24);
+}
+
+async function getRecentCompetitionMedia(input = {}) {
+  const directMessageId = Number(input.messageId || input.message_id);
+  const conversationId = Number(input.conversationId || input.conversation_id);
+  const explicitBannerId = Number(
+    input.bannerMessageId || input.banner_message_id
+  );
+  const explicitBasesId = Number(input.basesMessageId || input.bases_message_id);
+  const ids = [directMessageId, explicitBannerId, explicitBasesId].filter(
+    Number.isInteger
+  );
+  let messages = [];
+
+  if (ids.length) {
+    messages.push(
+      ...(await prisma.message.findMany({
+        where: { id: { in: ids } },
+        select: {
+          id: true,
+          mediaMimeType: true,
+          mediaFilename: true,
+          timestamp: true,
+        },
+      }))
+    );
+  }
+  if (Number.isInteger(conversationId)) {
+    messages.push(
+      ...(await prisma.message.findMany({
+        where: { conversationId },
+        orderBy: { timestamp: "desc" },
+        take: 20,
+        select: {
+          id: true,
+          mediaMimeType: true,
+          mediaFilename: true,
+          timestamp: true,
+        },
+      }))
+    );
+  }
+
+  const unique = [
+    ...new Map(messages.map((message) => [message.id, message])).values(),
+  ].filter((message) => message.mediaMimeType);
+  const banner =
+    unique.find((message) => message.id === explicitBannerId) ||
+    (input.useMessageImageAsBanner === false
+      ? null
+      : unique.find((message) =>
+          String(message.mediaMimeType).startsWith("image/")
+        ));
+  const bases =
+    unique.find((message) => message.id === explicitBasesId) ||
+    unique.find(
+      (message) =>
+        String(message.mediaMimeType).includes("pdf") ||
+        String(message.mediaFilename || "")
+          .toLowerCase()
+          .endsWith(".pdf")
+    );
+
+  return {
+    bannerMessageId: banner?.id || null,
+    bannerFilename: banner?.mediaFilename || null,
+    basesMessageId: bases?.id || null,
+    basesFilename: bases?.mediaFilename || null,
+  };
+}
+
+async function getMessageMediaFile(messageId) {
+  if (!Number.isInteger(Number(messageId))) return null;
+  const message = await prisma.message.findUnique({
+    where: { id: Number(messageId) },
+    select: {
+      id: true,
+      mediaData: true,
+      mediaMimeType: true,
+      mediaFilename: true,
+    },
+  });
+  if (!message?.mediaData) return null;
+  return {
+    buffer: Buffer.from(message.mediaData),
+    mimeType: message.mediaMimeType || "application/octet-stream",
+    filename: message.mediaFilename || `media-${message.id}`,
+  };
+}
+
+function catalogSummary(item, labelGetter) {
+  return item
+    ? {
+        id: Number(item.id),
+        name: clean(labelGetter(item)),
+      }
+    : null;
+}
+
+function normalizeCompetitionPlanStatus(value) {
+  const normalized = normalizeText(value || "draft");
+  if (["publicado", "publicada", "published"].includes(normalized)) {
+    return "published";
+  }
+  return "draft";
+}
+
+async function previewCompetitionSetup(input = {}) {
+  const previousPlan =
+    input.plan?.version === COMPETITION_PLAN_VERSION ? input.plan : null;
+  if (previousPlan) {
+    const previousStartTime =
+      String(previousPlan.competition?.startAt || "").match(/T(\d{2}:\d{2})/)?.[1] ||
+      null;
+    const previousEndTime =
+      String(previousPlan.competition?.endAt || "").match(/T(\d{2}:\d{2})/)?.[1] ||
+      null;
+    input = {
+      ...input,
+      competitionName:
+        input.competitionName ||
+        input.name ||
+        previousPlan.competition?.name,
+      eventDate:
+        input.eventDate ||
+        input.date ||
+        previousPlan.competition?.date,
+      startTime: input.startTime || input.start || previousStartTime,
+      endTime: input.endTime || previousEndTime,
+      venueName:
+        input.venueName ||
+        input.venue ||
+        previousPlan.competition?.venueName,
+      country:
+        input.country ||
+        input.countryName ||
+        previousPlan.competition?.country?.name,
+      city:
+        input.city ||
+        input.cityName ||
+        previousPlan.competition?.city?.name,
+      sport:
+        input.sport ||
+        input.sportName ||
+        previousPlan.competition?.sport?.name,
+      organizer:
+        input.organizer ||
+        input.organizerName ||
+        previousPlan.competition?.organizer?.name,
+      status: input.status || previousPlan.competition?.status,
+      visibility:
+        input.visibility || previousPlan.competition?.visibility,
+      website: input.website || input.web || previousPlan.competition?.website,
+      registrationDeadline:
+        input.registrationDeadline ||
+        input.registrationEndDate ||
+        previousPlan.competition?.registrationDeadline,
+      events:
+        input.events ||
+        input.eventDefinitions ||
+        input.modalities ||
+        previousPlan.events,
+      tickets:
+        input.tickets ||
+        input.registrationTickets ||
+        input.prices ||
+        previousPlan.tickets,
+      payment:
+        input.payment ||
+        input.paymentDetails ||
+        previousPlan.payment,
+      format: input.format || previousPlan.rules?.format,
+      workoutOrder:
+        input.workoutOrder || previousPlan.rules?.workoutOrder,
+      waveSize: input.waveSize || previousPlan.rules?.waveSize,
+      rulesSummary:
+        input.rulesSummary || previousPlan.rules?.notes,
+      bannerMessageId:
+        input.bannerMessageId || previousPlan.media?.bannerMessageId,
+      basesMessageId:
+        input.basesMessageId || previousPlan.media?.basesMessageId,
+    };
+  }
+  const extracted =
+    input.mediaAnalysis?.extracted || input.imageAnalysis?.extracted || {};
+  const missingFields = [];
+  const warnings = [
+    ...(Array.isArray(input.mediaAnalysis?.warnings)
+      ? input.mediaAnalysis.warnings
+      : []),
+    ...(Array.isArray(input.mediaAnalysis?.assumptions)
+      ? input.mediaAnalysis.assumptions.map(
+          (assumption) => `Supuesto IA: ${assumption}`
+        )
+      : []),
+  ];
+  const competitionName = clean(
+    input.competitionName ||
+      input.name ||
+      input.eventName ||
+      extracted.competitionName ||
+      extracted.eventName ||
+      extracted.name
+  );
+  let date = null;
+  try {
+    date = parseCompetitionDate(
+      input.date ||
+        input.eventDate ||
+        input.competitionDate ||
+        extracted.eventDate ||
+        extracted.date ||
+        extracted.competitionDate
+    );
+  } catch (error) {
+    warnings.push(error.message);
+  }
+  if (!competitionName) missingFields.push("competitionName");
+  if (!date) missingFields.push("eventDate");
+
+  const countryHint =
+    clean(
+      input.country ||
+        input.countryName ||
+        extracted.country ||
+        extracted.countryName
+    ) || "Peru";
+  const cityHint = clean(
+    input.city || input.cityName || extracted.city || extracted.cityName
+  );
+  const inferredSport = /hybrid|carrera|race|run/i.test(
+    `${competitionName || ""} ${JSON.stringify(extracted)}`
+  )
+    ? "Running"
+    : null;
+  const sportHint = clean(
+    input.sport ||
+      input.sportName ||
+      extracted.sport ||
+      extracted.sportName ||
+      inferredSport
+  );
+  const organizerHint = clean(
+    input.organizer ||
+      input.organizerName ||
+      extracted.organizer ||
+      extracted.organizerName
+  );
+  const allowUnassignedOrganizer =
+    input.allowUnassignedOrganizer === true ||
+    input.useUnassignedOrganizer === true ||
+    normalizeText(organizerHint).includes("sin asignar");
+  if (!cityHint) missingFields.push("city");
+  if (!sportHint) missingFields.push("sport");
+  if (!organizerHint && !allowUnassignedOrganizer) {
+    missingFields.push("organizer");
+  }
+
+  const catalogs = await getCompetitionCatalogs();
+  let country = null;
+  let city = null;
+  let sport = null;
+  let organizer = null;
+  try {
+    country = bestCatalogMatch(
+      catalogs.countries,
+      countryHint,
+      (item) => item.pais || item.name || item.codigo,
+      "pais"
+    );
+  } catch (error) {
+    warnings.push(error.message);
+    missingFields.push("country");
+  }
+  try {
+    const cityCandidates = catalogs.cities.filter(
+      (item) =>
+        !country?.id ||
+        (!item.country_id && !item.pais) ||
+        String(item.country_id || item.pais) === String(country.id)
+    );
+    city = bestCatalogMatch(
+      cityCandidates.length ? cityCandidates : catalogs.cities,
+      cityHint,
+      (item) => item.city || item.name,
+      "ciudad"
+    );
+  } catch (error) {
+    if (cityHint) warnings.push(error.message);
+    missingFields.push("city");
+  }
+  try {
+    sport = bestCatalogMatch(
+      catalogs.sports,
+      sportHint,
+      (item) => item.name,
+      "deporte"
+    );
+  } catch (error) {
+    if (sportHint) warnings.push(error.message);
+    missingFields.push("sport");
+  }
+  try {
+    const organizerCandidates = [...catalogs.organizers]
+      .filter((item) => normalizeText(item.status) !== "inactive")
+      .sort(
+        (left, right) =>
+          Number(normalizeText(right.type) === "organizer") -
+          Number(normalizeText(left.type) === "organizer")
+      );
+    organizer = bestCatalogMatch(
+      organizerCandidates,
+      organizerHint,
+      (item) => item.name,
+      "organizador",
+      {
+        minScore: 65,
+        fallback: allowUnassignedOrganizer
+          ? () =>
+              organizerCandidates.find(
+                (item) =>
+                  normalizeText(item.name) === "sin asignar" ||
+                  normalizeText(item.name).includes("sin asignar")
+              )
+          : undefined,
+      }
+    );
+  } catch (error) {
+    if (organizerHint) warnings.push(error.message);
+    missingFields.push("organizer");
+  }
+
+  const startTime = clean(
+    input.startTime || input.start || extracted.startTime || "08:00"
+  );
+  const endTime = clean(input.endTime || extracted.endTime || "23:59");
+  const venueName = clean(
+    input.venueName ||
+      input.venue ||
+      input.location ||
+      extracted.venueName ||
+      extracted.venue ||
+      extracted.location
+  );
+  let registrationDeadline = null;
+  const deadlineValue =
+    input.registrationDeadline ||
+    input.registrationEndDate ||
+    extracted.registrationDeadline ||
+    extracted.registrationEndDate;
+  if (deadlineValue) {
+    try {
+      registrationDeadline = parseCompetitionDate(deadlineValue);
+    } catch (error) {
+      warnings.push(error.message);
+    }
+  }
+  const events =
+    date && sport
+      ? normalizePlanEvents({
+          input,
+          extracted,
+          sportId: sport.id,
+          date,
+          startTime,
+          venueName,
+        })
+      : [];
+  if (!events.length) missingFields.push("events");
+  if (events.some((event) => !event.categories.length)) {
+    warnings.push(
+      "Hay eventos sin categorias; podran configurarse despues, pero los tickets no podran restringirse por categoria."
+    );
+  }
+
+  const salesEnd = registrationDeadline
+    ? formatCompetitionDateTime(registrationDeadline, "23:59:59")
+    : input.salesEnd || extracted.salesEnd || null;
+  const tickets = normalizePlanTickets({ input, extracted, events, salesEnd });
+  alignTieredCompetitionCategories(events, tickets, warnings);
+  if (!tickets.length) {
+    warnings.push("No se detectaron tickets con precios numericos.");
+  }
+  const invalidTicketEvents = tickets.filter((ticket) => !ticket.eventKey);
+  if (invalidTicketEvents.length) {
+    missingFields.push("ticketEventBindings");
+    warnings.push(
+      `No se pudo asociar evento para: ${invalidTicketEvents
+        .map((ticket) => ticket.title)
+        .join(", ")}.`
+    );
+  }
+  const invalidCategoryBindings = tickets.filter((ticket) => {
+    if (!ticket.categoryNames.length) return false;
+    const event = events.find((item) => item.key === ticket.eventKey);
+    if (!event) return false;
+    const wanted = ticket.categoryNames.map(normalizeText);
+    return !event.categories.some((category) =>
+      wanted.some(
+        (name) =>
+          normalizeText(category.name) === name ||
+          normalizeText(category.name).startsWith(`${name} `)
+      )
+    );
+  });
+  if (invalidCategoryBindings.length) {
+    missingFields.push("ticketCategoryBindings");
+    warnings.push(
+      `No se encontraron categorias compatibles para: ${invalidCategoryBindings
+        .map((ticket) => ticket.title)
+        .join(", ")}.`
+    );
+  }
+  const ticketBindingSignatures = tickets.map((ticket) => {
+    const event = events.find((item) => item.key === ticket.eventKey);
+    const wanted = ticket.categoryNames.map(normalizeText);
+    const matchedCategories = (event?.categories || [])
+      .filter(
+        (category) =>
+          !wanted.length ||
+          wanted.some(
+            (name) =>
+              normalizeText(category.name) === name ||
+              normalizeText(category.name).startsWith(`${name} `)
+          )
+      )
+      .map((category) => category.key)
+      .sort();
+    return {
+      ticket,
+      signature: `${ticket.eventKey}:${matchedCategories.join(",")}`,
+    };
+  });
+  const overlappingLevelTickets = ticketBindingSignatures.filter(
+    ({ ticket, signature }, index, rows) =>
+      /\b(open|pro)\b/.test(normalizeText(ticket.title)) &&
+      rows.some(
+        (other, otherIndex) =>
+          otherIndex !== index &&
+          other.ticket.eventKey === ticket.eventKey &&
+          /\b(open|pro)\b/.test(normalizeText(other.ticket.title)) &&
+          normalizeText(other.ticket.title).includes("open") !==
+            normalizeText(ticket.title).includes("open") &&
+          other.signature === signature
+      )
+  );
+  if (overlappingLevelTickets.length) {
+    missingFields.push("distinctTicketCategoryBindings");
+    warnings.push(
+      "Los tickets Open y Pro de un mismo evento no pueden quedar vinculados al mismo conjunto de categorias."
+    );
+  }
+
+  const payment = normalizePaymentPlan(input, extracted);
+  const media = await getRecentCompetitionMedia(input);
+  const website = clean(
+    input.website || input.web || extracted.website || extracted.web
+  );
+  const slug = slugify(
+    `${competitionName || "competencia"}-${date || "sin-fecha"}`
+  );
+  const requestedStatus = normalizeCompetitionPlanStatus(
+    input.status ||
+      extracted.status ||
+      (input.publish === true ? "published" : "draft")
+  );
+  const requestedVisibility = clean(
+    input.visibility || extracted.visibility || "public"
+  ).toLowerCase();
+  const duplicateRows =
+    competitionName && date ? await listCompetitionRows({ force: true }) : [];
+  const duplicates = duplicateRows
+    .filter((competition) => {
+      const sameDate =
+        String(competition.start_date || competition.date || "").slice(0, 10) ===
+        date;
+      const sameName =
+        normalizeText(competition.name) === normalizeText(competitionName);
+      const sameSlug = normalizeText(competition.slug) === normalizeText(slug);
+      const similarName =
+        competitionScore(competition, competitionName) >= 65;
+      return sameDate && (sameName || sameSlug || similarName);
+    })
+    .map((competition) => ({
+      id: Number(competition.id),
+      name: competition.name,
+      date: String(competition.start_date || competition.date || "").slice(
+        0,
+        10
+      ),
+      status: competition.status,
+      slug: competition.slug,
+    }));
+  if (duplicates.length && input.allowDuplicate !== true) {
+    warnings.push(
+      `Ya existe una competencia coincidente: ${duplicates
+        .map((item) => `${item.name} (#${item.id})`)
+        .join(", ")}.`
+    );
+  }
+
+  const uniqueMissing = [...new Set(missingFields)];
+  const plan = {
+    version: COMPETITION_PLAN_VERSION,
+    source:
+      input.creationSource ||
+      (media.basesMessageId || media.bannerMessageId
+        ? "whatsapp_media"
+        : "chat"),
+    competition: {
+      name: competitionName || null,
+      slug,
+      date,
+      startAt: date ? formatCompetitionDateTime(date, startTime) : null,
+      endAt: date ? formatCompetitionDateTime(date, endTime) : null,
+      venueName: venueName || null,
+      country: catalogSummary(
+        country,
+        (item) => item.pais || item.name || item.codigo
+      ),
+      city: catalogSummary(city, (item) => item.city || item.name),
+      sport: catalogSummary(sport, (item) => item.name),
+      organizer: catalogSummary(organizer, (item) => item.name),
+      status: requestedStatus,
+      visibility: ["public", "private"].includes(requestedVisibility)
+        ? requestedVisibility
+        : "public",
+      website: website || null,
+      registrationDeadline,
+    },
+    events,
+    tickets,
+    payment,
+    media,
+    rules: {
+      sourceDocument: media.basesFilename || null,
+      format:
+        clean(extracted.format || extracted.modality || input.format) || null,
+      workoutOrder:
+        extracted.workoutOrder ||
+        extracted.workouts ||
+        input.workoutOrder ||
+        [],
+      waveSize: planNumber(extracted.waveSize || input.waveSize),
+      notes:
+        extracted.rulesSummary ||
+        extracted.notes ||
+        input.rulesSummary ||
+        null,
+    },
+    duplicates,
+    warnings: [...new Set(warnings)],
+    missingFields: uniqueMissing,
+    readyToApply:
+      uniqueMissing.length === 0 &&
+      (duplicates.length === 0 || input.allowDuplicate === true),
+  };
+  plan.fingerprint = fingerprintCompetitionPlan(plan);
+
+  return {
+    preview: true,
+    readyToApply: plan.readyToApply,
+    plan,
+    summary: {
+      competition: plan.competition,
+      eventCount: events.length,
+      categoryCount: events.reduce(
+        (total, event) => total + event.categories.length,
+        0
+      ),
+      ticketCount: tickets.length,
+      ticketPrices: tickets.map((ticket) => ({
+        title: ticket.title,
+        price: ticket.price,
+        currency: ticket.currency,
+      })),
+      paymentConfigured: Boolean(payment.details),
+      bannerDetected: Boolean(media.bannerMessageId),
+      basesDetected: Boolean(media.basesMessageId),
+    },
+  };
+}
+
 async function getMessageBannerFile(input = {}) {
   const messageId = Number(input.messageId || input.message_id);
   if (!Number.isInteger(messageId)) return null;
@@ -1015,7 +2008,7 @@ async function getMessageBannerFile(input = {}) {
   };
 }
 
-async function createCompetitionFromBases(input = {}) {
+async function createCompetitionFromBasesLegacy(input = {}) {
   const extracted = input.mediaAnalysis?.extracted || input.imageAnalysis?.extracted || {};
   const competitionName = clean(
     input.competitionName ||
@@ -1209,11 +2202,636 @@ async function createCompetitionFromBases(input = {}) {
   };
 }
 
-async function createCompetitionFromChat(input = {}) {
-  return createCompetitionFromBases({
+async function createCompetitionFromChatLegacy(input = {}) {
+  return createCompetitionFromBasesLegacy({
     ...input,
     useMessageImageAsBanner: false,
     creationSource: "chat",
+  });
+}
+
+function buildCompetitionDescription(plan) {
+  const ticketDescriptions = Object.fromEntries(
+    plan.tickets.map((ticket) => [
+      ticket.title,
+      `${
+        ticket.teamSize > 1
+          ? `Inscripcion para ${ticket.teamSize} integrantes`
+          : "Inscripcion individual"
+      }${ticket.eventName ? ` - ${ticket.eventName}` : ""}.`,
+    ])
+  );
+  return {
+    face: false,
+    extra: {},
+    sheet: "",
+    waLink: "",
+    buyPhoto: false,
+    gapVideo: 0,
+    type_pay: plan.payment.type || "voucher",
+    photoLink: "#",
+    public_key: null,
+    trackingEnd: "",
+    access_token: null,
+    collector_id: null,
+    trackingInit: "",
+    application_fee: 15,
+    payments_details:
+      plan.payment.details ||
+      (plan.competition.website ? `Web: ${plan.competition.website}` : ""),
+    type_competition: "evento",
+    campeonato_nacional: false,
+    event_summary: {
+      venue: plan.competition.venueName,
+      starts_at: plan.competition.startAt,
+      registration_deadline: plan.competition.registrationDeadline,
+      format: plan.rules.format,
+    },
+    automation: {
+      source: "soporte-exotimer",
+      planVersion: plan.version,
+      setupFingerprint: plan.fingerprint,
+    },
+    taller: {
+      faq: [],
+      costo: "",
+      cupos: "",
+      fecha: "",
+      lugar: "",
+      nivel: "",
+      title: "",
+      banner: "",
+      galeria: [],
+      incluye: [],
+      resumen: "",
+      reviews: [],
+      contacto: {},
+      duracion: "",
+      horarios: [],
+      objetivos: [],
+      cupos_text: "",
+      dirigido_a: [],
+      requisitos: [],
+      condiciones: [],
+      payments_details: "",
+      ticketDescriptions,
+    },
+  };
+}
+
+function buildPlannedSetupEvent(plan, event) {
+  const rangeStartAt = formatCompetitionDateTime(
+    plan.competition.date,
+    "05:00"
+  );
+  const rangeEndAt = formatCompetitionDateTime(
+    plan.competition.date,
+    "23:59"
+  );
+  const readerSlug = plan.competition.slug.slice(0, 120);
+  return {
+    client_key: event.key,
+    name: event.name,
+    start_at: event.startAt,
+    distance_meters: event.distanceMeters,
+    venue_name: event.venueName,
+    max_participants: event.maxParticipants,
+    is_active: true,
+    categories: event.categories.map((category) => ({
+      category: {
+        sport_id: category.sportId || plan.competition.sport.id,
+        name: category.name,
+        gender_rule: category.genderRule,
+        min_age: category.minAge,
+        max_age: category.maxAge,
+        description: category.description,
+        is_active: true,
+      },
+      is_enabled: true,
+    })),
+    routes: [
+      {
+        name: event.routeName || "Circuito principal",
+        is_primary: true,
+      },
+    ],
+    timing_config: event.timingEnabled
+      ? {
+          type_salidas: "cronometro",
+          start_waves: [
+            {
+              client_key: "general",
+              name: `${event.name} - salida general`,
+              starts_at: event.startAt,
+              sort_order: 0,
+              payload: event.waveSize ? { wave_size: event.waveSize } : {},
+            },
+          ],
+          checkpoints: [
+            {
+              client_key: "start",
+              sequence: 0,
+              name: "Salida",
+              kind: "start",
+              location_code: "SALIDA",
+              distance_meters: 0,
+              range_start_at: rangeStartAt,
+              range_end_at: rangeEndAt,
+              readers: [
+                {
+                  mac: `reader_SALIDA_${readerSlug}`,
+                  active: true,
+                },
+              ],
+            },
+            {
+              client_key: "finish",
+              sequence: 1,
+              name: "Meta",
+              kind: "finish",
+              location_code: "META",
+              distance_meters: event.distanceMeters,
+              range_start_at: rangeStartAt,
+              range_end_at: rangeEndAt,
+              readers: [
+                {
+                  mac: `reader_META_${readerSlug}`,
+                  active: true,
+                },
+              ],
+            },
+          ],
+          structured_sections: [],
+        }
+      : null,
+    extra_data: {
+      source: "soporte-exotimer",
+      client_key: event.key,
+    },
+  };
+}
+
+function eventCategoryRows(event) {
+  return (
+    event.categories ||
+    event.event_categories ||
+    event.category_details ||
+    []
+  ).map((row) => ({
+    id: Number(row.category_id || row.category?.id || row.id),
+    name: clean(row.category?.name || row.name),
+    genderRule: clean(row.category?.gender_rule || row.gender_rule),
+  }));
+}
+
+function ticketCategoryIds(ticket, event) {
+  const categories = eventCategoryRows(event);
+  if (!ticket.categoryNames.length) {
+    return categories.map((category) => category.id);
+  }
+  const wanted = ticket.categoryNames.map(normalizeText);
+  return categories
+    .filter((category) =>
+      wanted.some(
+        (name) =>
+          normalizeText(category.name) === name ||
+          normalizeText(category.name).startsWith(`${name} `)
+      )
+    )
+    .map((category) => category.id);
+}
+
+async function findPlanCompetition(plan) {
+  const rows = await listCompetitionRows({ force: true });
+  const matches = rows.filter((competition) => {
+    const sameDate =
+      String(competition.start_date || competition.date || "").slice(0, 10) ===
+      plan.competition.date;
+    return (
+      sameDate &&
+      (normalizeText(competition.slug) ===
+        normalizeText(plan.competition.slug) ||
+        normalizeText(competition.name) ===
+          normalizeText(plan.competition.name) ||
+        competitionScore(competition, plan.competition.name) >= 65)
+    );
+  });
+  for (const match of matches) {
+    const full = await apiRequest({
+      path: `/catalog/api/v1/competitions/${match.id}/full`,
+    }).catch(() => match);
+    if (
+      full?.description?.automation?.setupFingerprint === plan.fingerprint
+    ) {
+      return { match: full, resumable: true };
+    }
+  }
+  return { match: matches[0] || null, resumable: false };
+}
+
+async function verifyAppliedCompetition(plan, competitionId) {
+  const [full, ticketRows, salidas] = await Promise.all([
+    apiRequest({
+      path: `/catalog/api/v1/competitions/${competitionId}/full`,
+    }),
+    requestAllPages(
+      "/registration/api/v1/tickets/",
+      { competition_id: Number(competitionId) },
+      100
+    ),
+    apiRequest({
+      path: `/timing/api/v1/raws/config/salidas/${competitionId}/`,
+    }).catch(() => null),
+  ]);
+  const events = full.events || [];
+  const eventChecks = plan.events.map((expected) => {
+    const actual = events.find(
+      (event) => normalizeText(event.name) === normalizeText(expected.name)
+    );
+    const actualCategories = actual ? eventCategoryRows(actual) : [];
+    return {
+      key: expected.key,
+      eventId: actual?.id || null,
+      exists: Boolean(actual),
+      categoriesExpected: expected.categories.length,
+      categoriesPersisted: expected.categories.filter((category) =>
+        actualCategories.some(
+          (actualCategory) =>
+            normalizeText(actualCategory.name) ===
+              normalizeText(category.name) &&
+            normalizeText(actualCategory.genderRule) ===
+              normalizeText(category.genderRule)
+        )
+      ).length,
+      timingPresent:
+        !expected.timingEnabled || Boolean(actual && salidas?.[actual.id]),
+    };
+  });
+  const ticketChecks = plan.tickets.map((expected) => {
+    const actual = ticketRows.find(
+      (ticket) => normalizeText(ticket.title) === normalizeText(expected.title)
+    );
+    return {
+      key: expected.key,
+      ticketId: actual?.id || null,
+      exists: Boolean(actual),
+      priceMatches: Number(actual?.price) === Number(expected.price),
+      statusMatches: actual?.status === expected.status,
+      hasEventBinding: Boolean(actual?.event_bindings?.length),
+    };
+  });
+  const checks = {
+    competitionPersisted: Number(full.id) === Number(competitionId),
+    statusMatches: full.status === plan.competition.status,
+    paymentMatches:
+      !plan.payment.details ||
+      (full.description?.type_pay === (plan.payment.type || "voucher") &&
+        full.description?.payments_details === plan.payment.details),
+    eventsComplete: eventChecks.every(
+      (check) =>
+        check.exists &&
+        check.categoriesExpected === check.categoriesPersisted &&
+        check.timingPresent
+    ),
+    ticketsComplete: ticketChecks.every(
+      (check) =>
+        check.exists &&
+        check.priceMatches &&
+        check.statusMatches &&
+        check.hasEventBinding
+    ),
+    bannerComplete:
+      !plan.media.bannerMessageId || Boolean(full.banner_url),
+    basesComplete: !plan.media.basesMessageId || Boolean(full.bases_url),
+  };
+  return {
+    complete: Object.values(checks).every(Boolean),
+    checks,
+    eventChecks,
+    ticketChecks,
+    competition: full,
+    tickets: ticketRows,
+    salidas,
+  };
+}
+
+async function applyCompetitionSetup(input = {}) {
+  if (input.confirmed !== true) {
+    throw new Error(
+      "La creacion completa requiere confirmacion explicita del Timer."
+    );
+  }
+  const preview = input.plan
+    ? { plan: input.plan, readyToApply: input.plan.readyToApply }
+    : await previewCompetitionSetup(input);
+  const plan = preview.plan;
+  if (!plan || plan.version !== COMPETITION_PLAN_VERSION) {
+    throw new Error(
+      "El plan de competencia es invalido o esta desactualizado."
+    );
+  }
+  if (fingerprintCompetitionPlan(plan) !== plan.fingerprint) {
+    throw new Error(
+      "El plan fue modificado despues del preview. Genera un nuevo preview."
+    );
+  }
+  if (!plan.readyToApply || plan.missingFields?.length) {
+    throw new Error(
+      `El plan no esta listo. Faltan: ${
+        (plan.missingFields || []).join(", ") || "datos por validar"
+      }.`
+    );
+  }
+
+  const existing = await findPlanCompetition(plan);
+  if (
+    existing.match &&
+    !existing.resumable &&
+    input.allowDuplicate !== true
+  ) {
+    throw new Error(
+      `Ya existe una competencia coincidente: ${existing.match.name} (#${existing.match.id}).`
+    );
+  }
+
+  const auditSteps = [];
+  const operationErrors = [];
+  let competitionId = existing.resumable ? Number(existing.match.id) : null;
+
+  if (!competitionId) {
+    const setupPayload = {
+      competition: {
+        name: plan.competition.name,
+        slug: plan.competition.slug,
+        start_date: plan.competition.startAt,
+        end_date: plan.competition.endAt,
+        country_id: plan.competition.country.id,
+        city_id: plan.competition.city.id,
+        sport_id: plan.competition.sport.id,
+        status: plan.competition.status,
+        visibility: plan.competition.visibility,
+        description: buildCompetitionDescription(plan),
+        rules: {
+          source_document: plan.rules.sourceDocument,
+          format: plan.rules.format,
+          workout_order: plan.rules.workoutOrder,
+          wave_size: plan.rules.waveSize,
+          notes: plan.rules.notes,
+          registration_deadline: plan.competition.registrationDeadline,
+          setup_fingerprint: plan.fingerprint,
+        },
+        owners: [
+          {
+            organization_id: plan.competition.organizer.id,
+            role: "owner",
+            is_primary: true,
+          },
+        ],
+      },
+      events: plan.events.map((event) =>
+        buildPlannedSetupEvent(plan, event)
+      ),
+    };
+    const setupResponse = await apiRequest({
+      method: "POST",
+      path: "/catalog/api/v1/competitions/setup",
+      params: { create_timing_configs: true },
+      data: setupPayload,
+    });
+    competitionId = Number(
+      setupResponse?.competition?.id || setupResponse?.id
+    );
+    if (!competitionId) {
+      throw new Error("Race Line no devolvio id de competencia creada.");
+    }
+    auditSteps.push({
+      request: {
+        method: "POST",
+        endpoint: "/catalog/api/v1/competitions/setup",
+        params: { create_timing_configs: true },
+        payload: setupPayload,
+      },
+      response: setupResponse,
+    });
+  } else {
+    auditSteps.push({
+      request: {
+        method: "RESUME",
+        endpoint: `/catalog/api/v1/competitions/${competitionId}/full`,
+      },
+      response: {
+        competitionId,
+        reason: "matching_setup_fingerprint",
+      },
+    });
+  }
+
+  competitionCache.expiresAt = 0;
+  let detail = await apiRequest({
+    path: `/catalog/api/v1/competitions/${competitionId}/full`,
+  });
+  for (const mediaSpec of [
+    {
+      field: "banner_url",
+      messageId: plan.media.bannerMessageId,
+      current: detail.banner_url,
+    },
+    {
+      field: "bases_url",
+      messageId: plan.media.basesMessageId,
+      current: detail.bases_url,
+    },
+  ]) {
+    if (!mediaSpec.messageId || mediaSpec.current) continue;
+    try {
+      const file = await getMessageMediaFile(mediaSpec.messageId);
+      if (!file) {
+        throw new Error(
+          `No se encontro el archivo del mensaje ${mediaSpec.messageId}.`
+        );
+      }
+      const response = await apiMultipartRequest({
+        method: "POST",
+        path: `/catalog/api/v1/competitions/${competitionId}/media/${mediaSpec.field}`,
+        files: { media: file },
+      });
+      auditSteps.push({
+        request: {
+          method: "POST",
+          endpoint: `/catalog/api/v1/competitions/${competitionId}/media/${mediaSpec.field}`,
+          payload: {
+            filename: file.filename,
+            mimeType: file.mimeType,
+            bytes: file.buffer.length,
+          },
+        },
+        response,
+      });
+    } catch (error) {
+      operationErrors.push({
+        step: `upload_${mediaSpec.field}`,
+        error: error.response?.data || error.message,
+      });
+    }
+  }
+
+  detail = await apiRequest({
+    path: `/catalog/api/v1/competitions/${competitionId}/full`,
+  });
+  const events = detail.events || [];
+  const existingTickets = await requestAllPages(
+    "/registration/api/v1/tickets/",
+    { competition_id: competitionId },
+    100
+  );
+  for (const ticket of plan.tickets) {
+    try {
+      const event = events.find(
+        (item) =>
+          normalizeText(item.name) === normalizeText(ticket.eventName)
+      );
+      if (!event) {
+        throw new Error(`No se encontro el evento ${ticket.eventName}.`);
+      }
+      const categoryIds = ticketCategoryIds(ticket, event);
+      if (ticket.categoryNames.length && !categoryIds.length) {
+        throw new Error(
+          `No se encontraron las categorias de ${ticket.title}.`
+        );
+      }
+      const payload = {
+        competition_id: competitionId,
+        title: ticket.title,
+        starts_at: ticket.startsAt,
+        ends_at: ticket.endsAt,
+        price: ticket.price,
+        affiliated_price: ticket.affiliatedPrice,
+        currency: ticket.currency,
+        status: ticket.status,
+        max_quantity: ticket.maxQuantity,
+        event_ids: [Number(event.id)],
+        event_bindings: [
+          {
+            event_id: Number(event.id),
+            category_ids: categoryIds,
+          },
+        ],
+        metadata_json: {
+          ...ticket.metadata,
+          setup_fingerprint: plan.fingerprint,
+        },
+      };
+      const existingTicket = existingTickets.find(
+        (item) =>
+          normalizeText(item.title) === normalizeText(ticket.title)
+      );
+      const request = existingTicket
+        ? {
+            method: "PATCH",
+            path: `/registration/api/v1/tickets/${existingTicket.id}`,
+            data: payload,
+          }
+        : {
+            method: "POST",
+            path: "/registration/api/v1/tickets/",
+            data: payload,
+          };
+      const response = await apiRequest(request);
+      auditSteps.push({
+        request: {
+          method: request.method,
+          endpoint: request.path,
+          payload,
+        },
+        response,
+      });
+    } catch (error) {
+      operationErrors.push({
+        step: `ticket_${ticket.key}`,
+        error: error.response?.data || error.message,
+      });
+    }
+  }
+
+  const verification = await verifyAppliedCompetition(
+    plan,
+    competitionId
+  );
+  return {
+    created: !existing.resumable,
+    resumed: existing.resumable,
+    complete:
+      verification.complete && operationErrors.length === 0,
+    needsRepair:
+      !verification.complete || operationErrors.length > 0,
+    competitionId,
+    competition: {
+      id: verification.competition.id,
+      name: verification.competition.name,
+      date: verification.competition.start_date?.slice?.(0, 10),
+      status: verification.competition.status,
+      visibility: verification.competition.visibility,
+      country: plan.competition.country.name,
+      city: plan.competition.city.name,
+      sport: plan.competition.sport.name,
+      organizer: plan.competition.organizer.name,
+      banner: verification.competition.banner_url || null,
+      bases: verification.competition.bases_url || null,
+    },
+    events: verification.eventChecks,
+    tickets: verification.ticketChecks,
+    payment: {
+      type: plan.payment.type,
+      configured: verification.checks.paymentMatches,
+    },
+    verification: {
+      complete: verification.complete,
+      checks: verification.checks,
+      salidas: verification.salidas,
+    },
+    operationErrors,
+    planFingerprint: plan.fingerprint,
+    audit: {
+      steps: auditSteps,
+      verification: {
+        request: {
+          method: "GET",
+          endpoints: [
+            `/catalog/api/v1/competitions/${competitionId}/full`,
+            `/registration/api/v1/tickets/?competition_id=${competitionId}`,
+            `/timing/api/v1/raws/config/salidas/${competitionId}/`,
+          ],
+        },
+        response: {
+          checks: verification.checks,
+          eventChecks: verification.eventChecks,
+          ticketChecks: verification.ticketChecks,
+        },
+      },
+    },
+  };
+}
+
+async function createCompetitionFromBases(input = {}) {
+  const preview = await previewCompetitionSetup({
+    ...input,
+    creationSource: "bases",
+  });
+  return applyCompetitionSetup({
+    ...input,
+    plan: preview.plan,
+  });
+}
+
+async function createCompetitionFromChat(input = {}) {
+  const preview = await previewCompetitionSetup({
+    ...input,
+    useMessageImageAsBanner: false,
+    creationSource: "chat",
+  });
+  return applyCompetitionSetup({
+    ...input,
+    plan: preview.plan,
   });
 }
 
@@ -2941,6 +4559,8 @@ const HANDLERS = {
   EXOTIMER_EDIT_RESULT_TIME: editResultTime,
   EXOTIMER_APPLY_RESULT_TIME_EVIDENCE_CORRECTION: applyResultTimeEvidenceCorrection,
   EXOTIMER_GET_CONNECTED_READERS: getConnectedReaders,
+  EXOTIMER_PREVIEW_COMPETITION_SETUP: previewCompetitionSetup,
+  EXOTIMER_APPLY_COMPETITION_SETUP: applyCompetitionSetup,
   EXOTIMER_CREATE_COMPETITION_FROM_BASES: createCompetitionFromBases,
   EXOTIMER_CREATE_COMPETITION_FROM_CHAT: createCompetitionFromChat,
   BUYER_CREATE_PRICE_INQUIRY: createBuyerInquiry,

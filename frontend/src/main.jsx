@@ -7,6 +7,7 @@ import {
   ClipboardCheck,
   Eye,
   Filter,
+  FileText,
   Headphones,
   Image as ImageIcon,
   LockKeyhole,
@@ -212,11 +213,16 @@ function formatJson(value) {
 
 function normalizeConversation(item) {
   const last = item.messages?.[0];
-  const lastMessage = last?.contentType === "IMAGE"
-    ? last.content && last.content !== "[Imagen recibida]"
-      ? `Imagen: ${last.content}`
-      : "Imagen recibida"
-    : last?.content || "Sin mensajes recientes";
+  const lastMessage =
+    last?.contentType === "IMAGE"
+      ? last.content && last.content !== "[Imagen recibida]"
+        ? `Imagen: ${last.content}`
+        : "Imagen recibida"
+      : last?.contentType === "DOCUMENT"
+        ? last.mediaFilename
+          ? `Documento: ${last.mediaFilename}`
+          : "Documento recibido"
+        : last?.content || "Sin mensajes recientes";
   return {
     ...item,
     name: item.displayName || item.phone || "Cliente",
@@ -303,20 +309,22 @@ function summarizeAction(action) {
 }
 
 function MessageMedia({ message, onPreview }) {
-  const [imageUrl, setImageUrl] = useState("");
+  const [mediaUrl, setMediaUrl] = useState("");
 
   useEffect(() => {
-    if (message.contentType !== "IMAGE" || !message.mediaId) return undefined;
+    if (!["IMAGE", "DOCUMENT"].includes(message.contentType) || !message.mediaId) {
+      return undefined;
+    }
     let active = true;
     let objectUrl = "";
 
     apiBlobUrl(`/api/conversations/messages/${message.id}/media`)
       .then((url) => {
         objectUrl = url;
-        if (active) setImageUrl(url);
+        if (active) setMediaUrl(url);
       })
       .catch(() => {
-        if (active) setImageUrl("");
+        if (active) setMediaUrl("");
       });
 
     return () => {
@@ -325,18 +333,39 @@ function MessageMedia({ message, onPreview }) {
     };
   }, [message.id, message.contentType, message.mediaId]);
 
-  if (message.contentType !== "IMAGE" || !message.mediaId) return null;
+  if (!["IMAGE", "DOCUMENT"].includes(message.contentType) || !message.mediaId) {
+    return null;
+  }
+
+  if (message.contentType === "DOCUMENT") {
+    return (
+      <div className="message-document">
+        <a
+          href={mediaUrl || undefined}
+          download={message.mediaFilename || "documento.pdf"}
+          aria-disabled={!mediaUrl}
+          title="Descargar documento"
+        >
+          <FileText size={20} />
+          <span>{message.mediaFilename || "Documento PDF"}</span>
+        </a>
+        {message.mediaAnalysis?.summary && (
+          <small>{message.mediaAnalysis.summary}</small>
+        )}
+      </div>
+    );
+  }
 
   return (
     <figure className="message-media">
       <button
         className="message-media-preview"
         type="button"
-        onClick={() => onPreview?.({ message, imageUrl })}
+        onClick={() => onPreview?.({ message, imageUrl: mediaUrl })}
         title="Abrir imagen"
       >
-        {imageUrl ? (
-          <img src={imageUrl} alt={message.content || "Imagen enviada por WhatsApp"} loading="lazy" />
+        {mediaUrl ? (
+          <img src={mediaUrl} alt={message.content || "Imagen enviada por WhatsApp"} loading="lazy" />
         ) : (
           <span className="message-media-placeholder">Cargando imagen...</span>
         )}
@@ -1437,10 +1466,14 @@ function SupportApp({ onBack }) {
                     ) : (
                       <article
                         key={message.id}
-                        className={`message ${message.direction === "OUTBOUND" ? "outbound" : "inbound"} ${message.contentType === "IMAGE" ? "has-media" : ""}`}
+                        className={`message ${message.direction === "OUTBOUND" ? "outbound" : "inbound"} ${["IMAGE", "DOCUMENT"].includes(message.contentType) ? "has-media" : ""}`}
                       >
                         <MessageMedia message={message} onPreview={setPreviewImage} />
-                        {message.content && message.content !== "[Imagen recibida]" && <p>{message.content}</p>}
+                        {message.content &&
+                          message.content !== "[Imagen recibida]" &&
+                          !message.content.startsWith("[Documento recibido") && (
+                            <p>{message.content}</p>
+                          )}
                         <time>
                           {humanTime(message.timestamp)}
                           {message.failed ? " · no enviado" : ""}

@@ -1,5 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { classifyMessage } = require("./ai");
 
 test("las acciones conservan el contrato y usan los endpoints Race Line v1", async () => {
   const calls = [];
@@ -189,4 +190,312 @@ test("las acciones conservan el contrato y usan los endpoints Race Line v1", asy
     calls.some((call) => /\/(?:v2|v3)\//.test(call.path) || call.path === "/api/token/"),
     false
   );
+});
+
+test("preview no escribe y apply crea categorias, tickets, pagos y timing verificable", async () => {
+  const calls = [];
+  const createdTickets = [];
+  let createdCompetition = null;
+  const raceline = require("./racelineClient");
+
+  raceline.apiRequest = async (request) => {
+    calls.push(request);
+    const { method = "GET", path } = request;
+
+    if (path === "/catalog/api/v1/countries") {
+      return [{ id: 1, name: "peru" }];
+    }
+    if (path === "/catalog/api/v1/cities") {
+      return [{ id: 1, name: "lima", country_id: 1 }];
+    }
+    if (path === "/catalog/api/v1/sports/") {
+      return [{ id: 1, name: "running" }];
+    }
+    if (path === "/identity/api/v1/organizations/") {
+      return [{ id: 9407, name: "Triatlon GT" }];
+    }
+    if (path === "/catalog/api/v1/competitions/") {
+      return createdCompetition ? [createdCompetition] : [];
+    }
+
+    if (
+      method === "POST" &&
+      path === "/catalog/api/v1/competitions/setup"
+    ) {
+      const events = request.data.events.map((event, eventIndex) => ({
+        ...event,
+        id: 1668 + eventIndex,
+        competition_id: 561,
+        categories: event.categories.map((row, categoryIndex) => ({
+          id: 7000 + eventIndex * 100 + categoryIndex,
+          event_id: 1668 + eventIndex,
+          category_id: 2619 + eventIndex * 100 + categoryIndex,
+          category: {
+            ...row.category,
+            id: 2619 + eventIndex * 100 + categoryIndex,
+          },
+        })),
+      }));
+      createdCompetition = {
+        ...request.data.competition,
+        id: 561,
+        banner_url: null,
+        bases_url: null,
+        owners: request.data.competition.owners.map((owner, index) => ({
+          ...owner,
+          id: index + 1,
+          competition_id: 561,
+        })),
+        events,
+      };
+      return {
+        competition: createdCompetition,
+        timing_configs: events.map((event) => ({
+          event_id: event.id,
+          status: "created",
+        })),
+      };
+    }
+
+    if (path === "/catalog/api/v1/competitions/561/full") {
+      return createdCompetition;
+    }
+    if (path === "/registration/api/v1/tickets/") {
+      if (method === "POST") {
+        const ticket = {
+          id: 976 + createdTickets.length,
+          ...request.data,
+        };
+        createdTickets.push(ticket);
+        return ticket;
+      }
+      return createdTickets;
+    }
+    if (
+      method === "PATCH" &&
+      /^\/registration\/api\/v1\/tickets\/\d+$/.test(path)
+    ) {
+      const id = Number(path.split("/").at(-1));
+      const index = createdTickets.findIndex((ticket) => ticket.id === id);
+      createdTickets[index] = {
+        ...createdTickets[index],
+        ...request.data,
+      };
+      return createdTickets[index];
+    }
+    if (path === "/timing/api/v1/raws/config/salidas/561/") {
+      return Object.fromEntries(
+        createdCompetition.events.map((event, index) => [
+          event.id,
+          {
+            id: index + 1,
+            event_id: event.id,
+            start_waves: [
+              {
+                name: `${event.name} - salida general`,
+                starts_at: event.start_at,
+              },
+            ],
+          },
+        ])
+      );
+    }
+    throw new Error(`Request inesperado: ${method} ${path}`);
+  };
+  raceline.apiMultipartRequest = async (request) => {
+    calls.push(request);
+    return {};
+  };
+
+  delete require.cache[require.resolve("./exotimerClient")];
+  const { executeAction } = require("./exotimerClient");
+  const input = {
+    competitionName: "Hybrid Race Test",
+    eventDate: "2026-11-14",
+    startTime: "06:00",
+    venueName: "Complejo Deportivo Costa Verde",
+    city: "Lima",
+    country: "Peru",
+    sport: "Running",
+    organizer: "Triatlon GT",
+    publish: true,
+    registrationDeadline: "2026-10-21",
+    events: [
+      {
+        name: "INDIVIDUAL",
+        distanceMeters: 8000,
+        categories: [
+          { name: "OPEN", genderRule: "Femenino" },
+          { name: "OPEN", genderRule: "Masculino" },
+          { name: "PRO", genderRule: "Femenino" },
+          { name: "PRO", genderRule: "Masculino" },
+        ],
+      },
+      {
+        name: "DUPLAS",
+        distanceMeters: 8000,
+        categories: [
+          { name: "DUPLAS Masculino", genderRule: "Masculino" },
+          { name: "DUPLAS Femenino", genderRule: "Femenino" },
+          { name: "DUPLAS Mixto", genderRule: "Mixto" },
+        ],
+      },
+    ],
+    tickets: [
+      {
+        title: "Individual Open",
+        price: 170,
+        eventName: "INDIVIDUAL",
+        categoryNames: ["OPEN"],
+      },
+      {
+        title: "Individual Pro",
+        price: 170,
+        eventName: "INDIVIDUAL",
+        categoryNames: ["PRO"],
+      },
+      {
+        title: "Duplas Open",
+        price: 340,
+        eventName: "DUPLAS",
+        categoryNames: [
+          "DUPLAS Masculino",
+          "DUPLAS Femenino",
+          "DUPLAS Mixto",
+        ],
+        teamSize: 2,
+      },
+      {
+        title: "Duplas Pro",
+        price: 340,
+        eventName: "DUPLAS",
+        categoryNames: [
+          "DUPLAS Masculino",
+          "DUPLAS Femenino",
+          "DUPLAS Mixto",
+        ],
+        teamSize: 2,
+      },
+    ],
+    payment: {
+      type: "voucher",
+      bank: "Interbank",
+      account: "0573340081703",
+      cci: "00305701334008170376",
+    },
+  };
+
+  const preview = await executeAction(
+    "TIMER",
+    "EXOTIMER_PREVIEW_COMPETITION_SETUP",
+    input
+  );
+  assert.equal(preview.readyToApply, true);
+  assert.equal(preview.summary.eventCount, 2);
+  assert.equal(preview.summary.categoryCount, 10);
+  assert.equal(preview.summary.ticketCount, 4);
+  assert.equal(
+    calls.some((call) => ["POST", "PATCH"].includes(call.method)),
+    false
+  );
+
+  const continuedPreview = await executeAction(
+    "TIMER",
+    "EXOTIMER_PREVIEW_COMPETITION_SETUP",
+    {
+      plan: preview.plan,
+      payment: {
+        ...preview.plan.payment,
+        details:
+          "Interbank\nCuenta: 0573340081703\nCCI: 00305701334008170376",
+      },
+    }
+  );
+  assert.equal(continuedPreview.plan.events.length, 2);
+  assert.equal(continuedPreview.plan.tickets.length, 4);
+  assert.equal(continuedPreview.plan.competition.organizer.id, 9407);
+
+  const result = await executeAction(
+    "TIMER",
+    "EXOTIMER_APPLY_COMPETITION_SETUP",
+    {
+      confirmed: true,
+      plan: continuedPreview.plan,
+    }
+  );
+  assert.equal(result.competitionId, 561);
+  assert.equal(result.complete, true);
+  assert.equal(result.needsRepair, false);
+  assert.equal(createdTickets.length, 4);
+
+  const setup = calls.find(
+    (call) =>
+      call.method === "POST" &&
+      call.path === "/catalog/api/v1/competitions/setup"
+  );
+  assert.equal(setup.data.competition.status, "published");
+  assert.equal(setup.data.events.length, 2);
+  assert.equal(setup.data.events[0].categories.length, 4);
+  assert.equal(setup.data.events[1].categories.length, 6);
+  assert.deepEqual(
+    setup.data.events[0].categories.map(
+      (row) => row.category.gender_rule
+    ),
+    ["Femenino", "Masculino", "Femenino", "Masculino"]
+  );
+
+  const duplasOpen = createdTickets.find(
+    (ticket) => ticket.title === "Duplas Open"
+  );
+  assert.equal(duplasOpen.price, 340);
+  assert.equal(duplasOpen.metadata_json.team_size, 2);
+  assert.equal(duplasOpen.event_bindings[0].category_ids.length, 3);
+  assert.equal(result.verification.checks.paymentMatches, true);
+  assert.equal(result.verification.checks.eventsComplete, true);
+
+  const resumed = await executeAction(
+    "TIMER",
+    "EXOTIMER_APPLY_COMPETITION_SETUP",
+    {
+      confirmed: true,
+      plan: continuedPreview.plan,
+    }
+  );
+  assert.equal(resumed.resumed, true);
+  assert.equal(resumed.complete, true);
+  assert.equal(createdTickets.length, 4);
+  assert.equal(
+    calls.filter(
+      (call) =>
+        call.method === "POST" &&
+        call.path === "/catalog/api/v1/competitions/setup"
+    ).length,
+    1
+  );
+});
+
+test("la confirmacion del Timer reutiliza exactamente el plan validado", async () => {
+  const plan = {
+    version: 1,
+    readyToApply: true,
+    fingerprint: "setup-test",
+    competition: { name: "Hybrid Race" },
+    events: [{ key: "individual", name: "Individual" }],
+    tickets: [{ title: "Individual Open", price: 170 }],
+  };
+
+  const classification = await classifyMessage({
+    text: "Confirmo, procede con la creacion",
+    forcedTimer: true,
+    previousClassification: {
+      action: "EXOTIMER_PREVIEW_COMPETITION_SETUP",
+      actionInput: { plan },
+    },
+    history: [],
+  });
+
+  assert.equal(classification.action, "EXOTIMER_APPLY_COMPETITION_SETUP");
+  assert.equal(classification.actionInput.confirmed, true);
+  assert.strictEqual(classification.actionInput.plan, plan);
+  assert.equal(classification.needsHuman, false);
 });

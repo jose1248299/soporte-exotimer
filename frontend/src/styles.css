@@ -774,6 +774,47 @@ button {
   color: rgba(255, 255, 255, 0.78);
 }
 
+.message-document {
+  display: grid;
+  gap: 6px;
+  min-width: min(300px, 70vw);
+}
+
+.message-document a {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 46px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 9px 11px;
+  color: #172033;
+  background: #f8fafc;
+  font-size: 13px;
+  font-weight: 800;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.message-document a[aria-disabled="true"] {
+  pointer-events: none;
+  opacity: 0.65;
+}
+
+.message-document small {
+  color: #526071;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.message.outbound .message-document a {
+  border-color: rgba(255, 255, 255, 0.35);
+}
+
+.message.outbound .message-document small {
+  color: rgba(255, 255, 255, 0.78);
+}
+
 .image-preview-backdrop {
   position: fixed;
   inset: 0;

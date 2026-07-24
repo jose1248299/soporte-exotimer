@@ -1,6 +1,11 @@
 const prisma = require("../lib/prisma");
 const config = require("../config");
-const { analyzeImageEvidence, classifyMessage, composeReply } = require("./ai");
+const {
+  analyzeDocumentEvidence,
+  analyzeImageEvidence,
+  classifyMessage,
+  composeReply,
+} = require("./ai");
 const { executeAction, requiresConfirmation } = require("./exotimerClient");
 const { getPolicy } = require("./supportPolicies");
 const { sendNewMessageNotification } = require("./pushNotifications");
@@ -346,7 +351,14 @@ function missingFieldsForAction(actionName, input = {}) {
     if (!hasEvidenceFinishTime) missing.push("evidenceFinishTime");
   }
 
-  if (actionName === "EXOTIMER_CREATE_COMPETITION_FROM_BASES" || actionName === "EXOTIMER_CREATE_COMPETITION_FROM_CHAT") {
+  if (
+    [
+      "EXOTIMER_APPLY_COMPETITION_SETUP",
+      "EXOTIMER_CREATE_COMPETITION_FROM_BASES",
+      "EXOTIMER_CREATE_COMPETITION_FROM_CHAT",
+    ].includes(actionName) &&
+    !input.plan?.readyToApply
+  ) {
     const extracted = input.mediaAnalysis?.extracted || input.imageAnalysis?.extracted || {};
     const hasName = Boolean(input.competitionName || input.eventName || input.name || extracted.competitionName || extracted.eventName || extracted.name);
     const hasDate = Boolean(input.date || input.eventDate || input.competitionDate || extracted.eventDate || extracted.date || extracted.competitionDate);
@@ -779,6 +791,7 @@ async function processConversationReply(conversationId) {
       ...classification.actionInput,
       source: isExotimer ? "exotimer" : "whatsapp",
       phone: conversation.phone,
+      conversationId: conversation.id,
       message: processableText,
       messageId: triggerMessage.id,
       mediaAnalysis: triggerMessage.mediaAnalysis || null,
@@ -824,6 +837,22 @@ async function processConversationReply(conversationId) {
           where: { id: action.id },
           data: { status: "EXECUTED", output: actionResult },
         });
+        if (
+          classification.action === "EXOTIMER_PREVIEW_COMPETITION_SETUP" &&
+          actionResult?.plan
+        ) {
+          classification = {
+            ...classification,
+            actionInput: {
+              ...(classification.actionInput || {}),
+              plan: actionResult.plan,
+            },
+          };
+          await prisma.conversation.update({
+            where: { id: conversation.id },
+            data: { classification },
+          });
+        }
       } catch (error) {
         actionError = error.message;
         await prisma.supportAction.update({
@@ -915,10 +944,11 @@ async function processInboundMessage({ waId, from, text = "", timestamp, rawPayl
 
   let mediaPayload = null;
   let mediaAnalysis = null;
-  const contentType = type === "image" ? "IMAGE" : "TEXT";
+  const contentType =
+    type === "image" ? "IMAGE" : type === "document" ? "DOCUMENT" : "TEXT";
   const baseContent = String(text || "").trim();
 
-  if (contentType === "IMAGE" && media?.id) {
+  if (["IMAGE", "DOCUMENT"].includes(contentType) && media?.id) {
     mediaPayload = {
       mediaId: media.id,
       mediaMimeType: media.mimeType || null,
@@ -935,19 +965,27 @@ async function processInboundMessage({ waId, from, text = "", timestamp, rawPayl
         mediaData: downloaded.buffer,
       };
 
-      mediaAnalysis = await analyzeImageEvidence({
+      const analysisInput = {
         buffer: downloaded.buffer,
         mimeType: mediaPayload.mediaMimeType,
+        filename: mediaPayload.mediaFilename,
         caption: baseContent,
         conversationContext: {
           previousUserType: conversation.userType,
           previousClassification: conversation.classification,
           history: previousHistory,
         },
-      });
+      };
+      mediaAnalysis =
+        contentType === "IMAGE"
+          ? await analyzeImageEvidence(analysisInput)
+          : await analyzeDocumentEvidence(analysisInput);
     } catch (error) {
       mediaAnalysis = {
-        summary: "No se pudo descargar o analizar la imagen recibida.",
+        summary:
+          contentType === "IMAGE"
+            ? "No se pudo descargar o analizar la imagen recibida."
+            : "No se pudo descargar o analizar el documento recibido.",
         error: error.message,
         relevance: "media",
         confidence: 0,
@@ -955,7 +993,13 @@ async function processInboundMessage({ waId, from, text = "", timestamp, rawPayl
     }
   }
 
-  const content = contentType === "IMAGE" ? baseContent || "[Imagen recibida]" : baseContent;
+  const content =
+    contentType === "IMAGE"
+      ? baseContent || "[Imagen recibida]"
+      : contentType === "DOCUMENT"
+        ? baseContent ||
+          `[Documento recibido${mediaPayload?.mediaFilename ? `: ${mediaPayload.mediaFilename}` : ""}]`
+        : baseContent;
 
   const inbound = await prisma.message.create({
     data: {

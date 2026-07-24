@@ -70,11 +70,16 @@ async function sendNewMessageNotification({ conversation, message, userType }) {
   if (!subscriptions.length) return { sent: 0, skipped: "no_subscriptions" };
 
   const title = conversation.displayName || conversation.phone || "Nuevo mensaje";
-  const body = message.contentType === "IMAGE"
-    ? message.content && message.content !== "[Imagen recibida]"
-      ? `Imagen: ${message.content}`
-      : "Imagen recibida por WhatsApp"
-    : message.content || "Nuevo mensaje recibido";
+  const body =
+    message.contentType === "IMAGE"
+      ? message.content && message.content !== "[Imagen recibida]"
+        ? `Imagen: ${message.content}`
+        : "Imagen recibida por WhatsApp"
+      : message.contentType === "DOCUMENT"
+        ? message.mediaFilename
+          ? `Documento: ${message.mediaFilename}`
+          : "Documento recibido por WhatsApp"
+        : message.content || "Nuevo mensaje recibido";
 
   const payload = JSON.stringify({
     title,

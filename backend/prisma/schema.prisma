@@ -29,6 +29,7 @@ enum MessageChannel {
 enum MessageContentType {
   TEXT
   IMAGE
+  DOCUMENT
 }
 
 enum ConversationStatus {

@@ -28,7 +28,9 @@ router.post("/", async (req, res) => {
     const message = value?.messages?.[0];
 
     if (!message) return res.sendStatus(200);
-    if (!["text", "image"].includes(message.type)) return res.sendStatus(200);
+    if (!["text", "image", "document"].includes(message.type)) {
+      return res.sendStatus(200);
+    }
 
     const contact = value.contacts?.[0];
     const timestamp = message.timestamp
@@ -41,12 +43,18 @@ router.post("/", async (req, res) => {
       waId: message.id || null,
       from: message.from,
       type: message.type,
-      text: message.type === "image" ? message.image?.caption || "" : message.text?.body || "",
-      media: message.type === "image"
+      text:
+        message.type === "image"
+          ? message.image?.caption || ""
+          : message.type === "document"
+            ? message.document?.caption || ""
+            : message.text?.body || "",
+      media: ["image", "document"].includes(message.type)
         ? {
-            id: message.image?.id || null,
-            mimeType: message.image?.mime_type || null,
-            sha256: message.image?.sha256 || null,
+            id: message[message.type]?.id || null,
+            mimeType: message[message.type]?.mime_type || null,
+            sha256: message[message.type]?.sha256 || null,
+            filename: message[message.type]?.filename || null,
           }
         : null,
       timestamp,
