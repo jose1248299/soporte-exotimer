@@ -309,7 +309,13 @@ async function classifyMessage({
       ? "- Estructura events como [{name,distanceMeters,startTime,venueName,categories:[{name,genderRule,minAge,maxAge}],waveSize}]. Estructura tickets como [{title,price,currency,status,eventName,categoryNames,teamSize,startsAt,endsAt}]. Estructura payment como {type,bank,account,cci,details}."
       : "",
     forcedTimer
-      ? "- Si los tickets distinguen niveles como Open y Pro, las categorias del evento tambien deben distinguirlos. Para duplas Open/Pro con HH, MM y Mixto crea OPEN HH, OPEN MM, OPEN MIXTA, PRO HH, PRO MM y PRO MIXTA; vincula cada ticket con categoryNames=['OPEN'] o ['PRO']."
+      ? "- Un ticket es una opcion de compra, no una categoria. Si Open y Pro tienen exactamente el mismo precio, moneda, vigencia, cupo, teamSize y condiciones, genera un solo ticket por evento/distancia y vincula todas sus categorias validas. Solo separalos si cambia una condicion comercial o el Timer lo pide expresamente."
+      : "",
+    forcedTimer
+      ? "- Trata la lista de categorias indicada por el Timer como exhaustiva: no inventes variantes simetricas ausentes. Si se mencionan niveles Open/Pro pero no sus combinaciones exactas, deja que el preview solicite categoryTierDefinitions."
+      : "",
+    forcedTimer
+      ? "- Cada ticket debe usar categoryNames que pertenezcan exclusivamente a su eventName. No mezcles categorias entre Individual, Duplas u otras distancias."
       : "",
     forcedTimer
       ? "- Si el preview devuelve readyToApply=true, resume el plan y pide confirmacion explicita. No uses EXOTIMER_APPLY_COMPETITION_SETUP en el mismo turno del preview."
@@ -471,7 +477,7 @@ async function analyzeImageEvidence({ buffer, mimeType, caption, conversationCon
       {
         role: "system",
         content:
-          "Analiza imagenes enviadas como evidencia o bases/afiche para soporte de cronometraje deportivo. Devuelve JSON estricto, breve y util. No inventes datos ilegibles. Si la imagen es afiche/bases de evento, extrae nombre, fecha, sede, ciudad/pais, deporte, organizador, modalidades/eventos, categorias, tickets con precios numericos, cierre de inscripciones y datos de pago. Para equipos conserva teamSize. Para capturas GPS/Strava/Garmin, distingue hora de inicio de actividad (activityStartDateTime) de hora de meta/llegada (evidenceFinishDateTime). Marca hasStrongEvidence=true si la imagen muestra nombre compatible o contexto claro, fecha/lugar compatibles, distancia coherente y tiempo/duracion del reclamo con confidence >= 0.85, aunque no sea una fuente oficial. Si la imagen solo aporta una pieza parcial fuerte, explicalo en evidenceSummary para que el hilo completo pueda usarse bajo TRUST_ATHLETE_EVIDENCE.",
+          "Analiza imagenes enviadas como evidencia o bases/afiche para soporte de cronometraje deportivo. Devuelve JSON estricto, breve y util. No inventes datos ilegibles. Si la imagen es afiche/bases de evento, extrae nombre, fecha, sede, ciudad/pais, deporte, organizador, modalidades/eventos, categorias, tickets con precios numericos, cierre de inscripciones y datos de pago. Un ticket es una opcion de compra, no una categoria: si varios niveles comparten exactamente las mismas condiciones comerciales, devuelve un solo ticket por evento/distancia con todas sus categoryNames. No inventes combinaciones simetricas de categorias que no aparezcan. Para equipos conserva teamSize. Para capturas GPS/Strava/Garmin, distingue hora de inicio de actividad (activityStartDateTime) de hora de meta/llegada (evidenceFinishDateTime). Marca hasStrongEvidence=true si la imagen muestra nombre compatible o contexto claro, fecha/lugar compatibles, distancia coherente y tiempo/duracion del reclamo con confidence >= 0.85, aunque no sea una fuente oficial. Si la imagen solo aporta una pieza parcial fuerte, explicalo en evidenceSummary para que el hilo completo pueda usarse bajo TRUST_ATHLETE_EVIDENCE.",
       },
       {
         role: "user",
@@ -660,7 +666,7 @@ async function analyzeDocumentEvidence({
   const response = await client.responses.create({
     model: config.openai.model,
     instructions:
-      "Analiza reglamentos, bases y brochures de eventos deportivos para configurar Race Line. Devuelve JSON estricto. Extrae solo datos presentes o inferencias muy seguras y coloca toda inferencia en assumptions. Las modalidades competitivas son eventos; los segmentos internos de una prueba no son tickets. Si OPEN y PRO aparecen descritos como categorias o divisiones de una modalidad Individual, conserva un solo evento INDIVIDUAL y crea OPEN/PRO por genero como categorias, no eventos separados. Conserva categorias por genero, tickets solo con precios numericos reales, vigencia, datos bancarios, sede y reglas operativas. No inventes organizador, precio, cuenta ni categoria.",
+      "Analiza reglamentos, bases y brochures de eventos deportivos para configurar Race Line. Devuelve JSON estricto. Extrae solo datos presentes o inferencias muy seguras y coloca toda inferencia en assumptions. Las modalidades competitivas son eventos; los segmentos internos de una prueba no son tickets. Un ticket es una opcion de compra: si OPEN y PRO comparten exactamente precio, moneda, vigencia, cupo, teamSize y condiciones, devuelve un solo ticket por evento/distancia con todas sus categoryNames; separalos solo si cambia una condicion comercial. Conserva exactamente las categorias descritas y no inventes combinaciones simetricas ausentes. Conserva tickets solo con precios numericos reales, vigencia, datos bancarios, sede y reglas operativas. No inventes organizador, precio, cuenta ni categoria.",
     input: [
       {
         role: "user",

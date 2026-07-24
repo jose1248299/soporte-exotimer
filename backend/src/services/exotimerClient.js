@@ -1265,46 +1265,129 @@ function normalizePlanTickets({ input, extracted, events, salesEnd }) {
     .filter(Boolean);
 }
 
-function alignTieredCompetitionCategories(events, tickets, warnings) {
-  for (const event of events) {
-    const eventTickets = tickets.filter(
-      (ticket) => ticket.eventKey === event.key
-    );
-    const openTickets = eventTickets.filter((ticket) =>
-      /\bopen\b/.test(normalizeText(ticket.title))
-    );
-    const proTickets = eventTickets.filter((ticket) =>
-      /\bpro\b/.test(normalizeText(ticket.title))
-    );
-    if (!openTickets.length || !proTickets.length) continue;
-    const categoriesAlreadyTiered = event.categories.some((category) =>
-      /\b(open|pro)\b/.test(normalizeText(category.name))
-    );
-    if (categoriesAlreadyTiered || !event.categories.length) continue;
+function ticketLevelSignals(ticket) {
+  const value = normalizeText(
+    `${ticket.title || ""} ${(ticket.categoryNames || []).join(" ")}`
+  );
+  return ["open", "pro"].filter((level) =>
+    new RegExp(`\\b${level}\\b`).test(value)
+  );
+}
 
-    event.categories = ["OPEN", "PRO"].flatMap((level) =>
-      event.categories.map((category) => {
-        const suffix =
-          category.genderRule === "Masculino"
-            ? "HH"
-            : category.genderRule === "Femenino"
-              ? "MM"
-              : "MIXTA";
-        return {
-          ...category,
-          key: `${slugify(level)}-${slugify(suffix)}-${slugify(
-            category.genderRule
-          )}`,
-          name: `${level} ${suffix}`,
-        };
-      })
+function ticketCommercialSignature(ticket) {
+  return JSON.stringify([
+    ticket.eventKey,
+    ticket.price,
+    ticket.affiliatedPrice ?? null,
+    ticket.currency,
+    ticket.status,
+    ticket.startsAt || null,
+    ticket.endsAt || null,
+    ticket.maxQuantity ?? null,
+    ticket.teamSize,
+  ]);
+}
+
+function humanizeTicketTitle(value) {
+  const title = clean(value);
+  if (!title || title !== title.toUpperCase()) return title;
+  return title
+    .split(/\s+/)
+    .map((word) =>
+      /\d+[A-Z]+/.test(word)
+        ? word
+        : `${word.charAt(0)}${word.slice(1).toLowerCase()}`
+    )
+    .join(" ");
+}
+
+function consolidateEquivalentTierTickets({
+  input,
+  events,
+  tickets,
+  warnings,
+}) {
+  if (
+    input.separateTicketsByCategoryLevel === true ||
+    input.separateTicketsByLevel === true ||
+    input.preserveTierTickets === true
+  ) {
+    return tickets;
+  }
+
+  const grouped = new Map();
+  for (const ticket of tickets) {
+    const signature = ticketCommercialSignature(ticket);
+    if (!grouped.has(signature)) grouped.set(signature, []);
+    grouped.get(signature).push(ticket);
+  }
+
+  const consumed = new Set();
+  const consolidated = [];
+  for (const ticket of tickets) {
+    if (consumed.has(ticket)) continue;
+    const group = grouped.get(ticketCommercialSignature(ticket)) || [ticket];
+    const levels = [
+      ...new Set(group.flatMap((item) => ticketLevelSignals(item))),
+    ];
+    const shouldMerge =
+      group.length > 1 &&
+      levels.includes("open") &&
+      levels.includes("pro") &&
+      group.every((item) => item.categoryNames.length > 0);
+    if (!shouldMerge) {
+      consolidated.push(ticket);
+      consumed.add(ticket);
+      continue;
+    }
+
+    group.forEach((item) => consumed.add(item));
+    const event = events.find((item) => item.key === ticket.eventKey);
+    const categoryNames = [];
+    for (const name of group.flatMap((item) => item.categoryNames)) {
+      if (
+        !categoryNames.some(
+          (existing) => normalizeText(existing) === normalizeText(name)
+        )
+      ) {
+        categoryNames.push(name);
+      }
+    }
+    const title = humanizeTicketTitle(
+      event?.name || ticket.eventName || ticket.title
     );
-    for (const ticket of openTickets) ticket.categoryNames = ["OPEN"];
-    for (const ticket of proTickets) ticket.categoryNames = ["PRO"];
+    consolidated.push({
+      ...ticket,
+      key: slugify(title) || ticket.key,
+      title,
+      categoryNames,
+      metadata: {
+        ...ticket.metadata,
+        category_levels: levels,
+        consolidated_ticket_keys: group.map((item) => item.key),
+      },
+    });
     warnings.push(
-      `Se separaron automaticamente las categorias Open y Pro de ${event.name} usando sus divisiones por genero.`
+      `Los tickets Open y Pro de ${event?.name || ticket.eventName} se consolidaron en ${title} porque tienen las mismas condiciones comerciales.`
     );
   }
+  return consolidated;
+}
+
+function categoryMatchesSelector(category, selector) {
+  const wanted = normalizeText(selector);
+  const actual = normalizeText(category.name);
+  return actual === wanted || actual.startsWith(`${wanted} `);
+}
+
+function plannedTicketCategories(ticket, event) {
+  if (!event) return [];
+  if (!ticket.categoryNames.length) return event.categories;
+  return event.categories.filter((category) =>
+    ticket.categoryNames.some((name) =>
+      categoryMatchesSelector(category, name)
+    )
+  );
 }
 
 function normalizePaymentPlan(input, extracted) {
@@ -1779,8 +1862,18 @@ async function previewCompetitionSetup(input = {}) {
   const salesEnd = registrationDeadline
     ? formatCompetitionDateTime(registrationDeadline, "23:59:59")
     : input.salesEnd || extracted.salesEnd || null;
-  const tickets = normalizePlanTickets({ input, extracted, events, salesEnd });
-  alignTieredCompetitionCategories(events, tickets, warnings);
+  const normalizedTickets = normalizePlanTickets({
+    input,
+    extracted,
+    events,
+    salesEnd,
+  });
+  const tickets = consolidateEquivalentTierTickets({
+    input,
+    events,
+    tickets: normalizedTickets,
+    warnings,
+  });
   if (!tickets.length) {
     warnings.push("No se detectaron tickets con precios numericos.");
   }
@@ -1797,13 +1890,11 @@ async function previewCompetitionSetup(input = {}) {
     if (!ticket.categoryNames.length) return false;
     const event = events.find((item) => item.key === ticket.eventKey);
     if (!event) return false;
-    const wanted = ticket.categoryNames.map(normalizeText);
-    return !event.categories.some((category) =>
-      wanted.some(
-        (name) =>
-          normalizeText(category.name) === name ||
-          normalizeText(category.name).startsWith(`${name} `)
-      )
+    return ticket.categoryNames.some(
+      (name) =>
+        !event.categories.some((category) =>
+          categoryMatchesSelector(category, name)
+        )
     );
   });
   if (invalidCategoryBindings.length) {
@@ -1814,19 +1905,29 @@ async function previewCompetitionSetup(input = {}) {
         .join(", ")}.`
     );
   }
+  const missingTierDefinitions = tickets.filter((ticket) => {
+    const levels = ticket.metadata?.category_levels || [];
+    if (!levels.includes("open") || !levels.includes("pro")) return false;
+    const event = events.find((item) => item.key === ticket.eventKey);
+    const eventLevels = new Set(
+      (event?.categories || []).flatMap((category) => {
+        const name = normalizeText(category.name);
+        return ["open", "pro"].filter((level) =>
+          new RegExp(`\\b${level}\\b`).test(name)
+        );
+      })
+    );
+    return !eventLevels.has("open") || !eventLevels.has("pro");
+  });
+  if (missingTierDefinitions.length) {
+    missingFields.push("categoryTierDefinitions");
+    warnings.push(
+      "Los precios mencionan Open y Pro, pero faltan las categorias exactas de ambos niveles. Indica solo las combinaciones que realmente existen; el sistema no creara variantes simetricas por inferencia."
+    );
+  }
   const ticketBindingSignatures = tickets.map((ticket) => {
     const event = events.find((item) => item.key === ticket.eventKey);
-    const wanted = ticket.categoryNames.map(normalizeText);
-    const matchedCategories = (event?.categories || [])
-      .filter(
-        (category) =>
-          !wanted.length ||
-          wanted.some(
-            (name) =>
-              normalizeText(category.name) === name ||
-              normalizeText(category.name).startsWith(`${name} `)
-          )
-      )
+    const matchedCategories = plannedTicketCategories(ticket, event)
       .map((category) => category.key)
       .sort();
     return {
@@ -2377,11 +2478,18 @@ function eventCategoryRows(event) {
     event.event_categories ||
     event.category_details ||
     []
-  ).map((row) => ({
-    id: Number(row.category_id || row.category?.id || row.id),
-    name: clean(row.category?.name || row.name),
-    genderRule: clean(row.category?.gender_rule || row.gender_rule),
-  }));
+  )
+    .map((row) => ({
+      id: Number(row.category_id || row.category?.id || row.id),
+      name: clean(row.category?.name || row.name),
+      genderRule: clean(row.category?.gender_rule || row.gender_rule),
+      isEnabled: row.is_enabled ?? row.isEnabled ?? true,
+      isActive: row.category?.is_active ?? row.is_active ?? true,
+    }))
+    .filter(
+      (category) =>
+        category.isEnabled !== false && category.isActive !== false
+    );
 }
 
 function ticketCategoryIds(ticket, event) {
@@ -2389,13 +2497,10 @@ function ticketCategoryIds(ticket, event) {
   if (!ticket.categoryNames.length) {
     return categories.map((category) => category.id);
   }
-  const wanted = ticket.categoryNames.map(normalizeText);
   return categories
     .filter((category) =>
-      wanted.some(
-        (name) =>
-          normalizeText(category.name) === name ||
-          normalizeText(category.name).startsWith(`${name} `)
+      ticket.categoryNames.some((name) =>
+        categoryMatchesSelector(category, name)
       )
     )
     .map((category) => category.id);
@@ -2427,6 +2532,19 @@ async function findPlanCompetition(plan) {
     }
   }
   return { match: matches[0] || null, resumable: false };
+}
+
+function sortedNumericIds(values) {
+  return [...new Set((values || []).map(Number).filter(Number.isFinite))].sort(
+    (left, right) => left - right
+  );
+}
+
+function sameNumericIds(left, right) {
+  return (
+    JSON.stringify(sortedNumericIds(left)) ===
+    JSON.stringify(sortedNumericIds(right))
+  );
 }
 
 async function verifyAppliedCompetition(plan, competitionId) {
@@ -2468,16 +2586,50 @@ async function verifyAppliedCompetition(plan, competitionId) {
     };
   });
   const ticketChecks = plan.tickets.map((expected) => {
-    const actual = ticketRows.find(
+    const candidates = ticketRows.filter(
       (ticket) => normalizeText(ticket.title) === normalizeText(expected.title)
     );
+    const actual =
+      candidates.find(
+        (ticket) =>
+          ticket.metadata_json?.setup_fingerprint === plan.fingerprint
+      ) || candidates[0];
+    const expectedEvent = events.find(
+      (event) =>
+        normalizeText(event.name) === normalizeText(expected.eventName)
+    );
+    const expectedCategoryIds = expectedEvent
+      ? ticketCategoryIds(expected, expectedEvent)
+      : [];
+    const bindings = actual?.event_bindings || [];
+    const binding = bindings.find(
+      (item) =>
+        Number(item.event_id || item.event?.id) === Number(expectedEvent?.id)
+    );
+    const actualEventIds = sortedNumericIds([
+      ...(actual?.event_ids || []),
+      ...bindings.map((item) => item.event_id || item.event?.id),
+    ]);
+    const expectedEventIds = expectedEvent ? [Number(expectedEvent.id)] : [];
+    const actualCategoryIds =
+      binding?.category_ids ||
+      binding?.categories?.map(
+        (category) => category.category_id || category.id
+      ) ||
+      [];
     return {
       key: expected.key,
       ticketId: actual?.id || null,
       exists: Boolean(actual),
       priceMatches: Number(actual?.price) === Number(expected.price),
       statusMatches: actual?.status === expected.status,
-      hasEventBinding: Boolean(actual?.event_bindings?.length),
+      hasEventBinding: bindings.length > 0,
+      eventBindingMatches: sameNumericIds(actualEventIds, expectedEventIds),
+      categoryBindingsMatch:
+        Boolean(binding) &&
+        sameNumericIds(actualCategoryIds, expectedCategoryIds),
+      expectedCategoryIds,
+      actualCategoryIds: sortedNumericIds(actualCategoryIds),
     };
   });
   const checks = {
@@ -2498,7 +2650,9 @@ async function verifyAppliedCompetition(plan, competitionId) {
         check.exists &&
         check.priceMatches &&
         check.statusMatches &&
-        check.hasEventBinding
+        check.hasEventBinding &&
+        check.eventBindingMatches &&
+        check.categoryBindingsMatch
     ),
     bannerComplete:
       !plan.media.bannerMessageId || Boolean(full.banner_url),

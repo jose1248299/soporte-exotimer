@@ -325,19 +325,29 @@ test("preview no escribe y apply crea categorias, tickets, pagos y timing verifi
         name: "INDIVIDUAL",
         distanceMeters: 8000,
         categories: [
-          { name: "OPEN", genderRule: "Femenino" },
-          { name: "OPEN", genderRule: "Masculino" },
-          { name: "PRO", genderRule: "Femenino" },
-          { name: "PRO", genderRule: "Masculino" },
+          { name: "OPEN MUJER", genderRule: "Femenino" },
+          { name: "OPEN HOMBRE", genderRule: "Masculino" },
+          { name: "PRO HOMBRE", genderRule: "Masculino" },
         ],
       },
       {
         name: "DUPLAS",
         distanceMeters: 8000,
         categories: [
-          { name: "DUPLAS Masculino", genderRule: "Masculino" },
-          { name: "DUPLAS Femenino", genderRule: "Femenino" },
-          { name: "DUPLAS Mixto", genderRule: "Mixto" },
+          {
+            name: "OPEN DUPLA HOMBRE/HOMBRE",
+            genderRule: "Masculino",
+          },
+          {
+            name: "OPEN DUPLA MUJER/MUJER",
+            genderRule: "Femenino",
+          },
+          { name: "OPEN DUPLA MIXTA", genderRule: "Mixto" },
+          {
+            name: "PRO DUPLA HOMBRE/HOMBRE",
+            genderRule: "Masculino",
+          },
+          { name: "PRO DUPLA MIXTA", genderRule: "Mixto" },
         ],
       },
     ],
@@ -358,22 +368,14 @@ test("preview no escribe y apply crea categorias, tickets, pagos y timing verifi
         title: "Duplas Open",
         price: 340,
         eventName: "DUPLAS",
-        categoryNames: [
-          "DUPLAS Masculino",
-          "DUPLAS Femenino",
-          "DUPLAS Mixto",
-        ],
+        categoryNames: ["OPEN DUPLA"],
         teamSize: 2,
       },
       {
         title: "Duplas Pro",
         price: 340,
         eventName: "DUPLAS",
-        categoryNames: [
-          "DUPLAS Masculino",
-          "DUPLAS Femenino",
-          "DUPLAS Mixto",
-        ],
+        categoryNames: ["PRO DUPLA"],
         teamSize: 2,
       },
     ],
@@ -392,11 +394,54 @@ test("preview no escribe y apply crea categorias, tickets, pagos y timing verifi
   );
   assert.equal(preview.readyToApply, true);
   assert.equal(preview.summary.eventCount, 2);
-  assert.equal(preview.summary.categoryCount, 10);
-  assert.equal(preview.summary.ticketCount, 4);
+  assert.equal(preview.summary.categoryCount, 8);
+  assert.equal(preview.summary.ticketCount, 2);
+  assert.deepEqual(
+    preview.plan.tickets.map((ticket) => ticket.title),
+    ["Individual", "Duplas"]
+  );
   assert.equal(
     calls.some((call) => ["POST", "PATCH"].includes(call.method)),
     false
+  );
+
+  const ambiguousPreview = await executeAction(
+    "TIMER",
+    "EXOTIMER_PREVIEW_COMPETITION_SETUP",
+    {
+      ...input,
+      competitionName: "Hybrid Race sin categorias por nivel",
+      events: input.events.map((event) =>
+        event.name === "DUPLAS"
+          ? {
+              ...event,
+              categories: [
+                { name: "DUPLAS Masculino", genderRule: "Masculino" },
+                { name: "DUPLAS Femenino", genderRule: "Femenino" },
+                { name: "DUPLAS Mixto", genderRule: "Mixto" },
+              ],
+            }
+          : event
+      ),
+      tickets: input.tickets.map((ticket) =>
+        ticket.eventName === "DUPLAS"
+          ? {
+              ...ticket,
+              categoryNames: [
+                "DUPLAS Masculino",
+                "DUPLAS Femenino",
+                "DUPLAS Mixto",
+              ],
+            }
+          : ticket
+      ),
+    }
+  );
+  assert.equal(ambiguousPreview.readyToApply, false);
+  assert.equal(ambiguousPreview.summary.categoryCount, 6);
+  assert.equal(ambiguousPreview.summary.ticketCount, 2);
+  assert.ok(
+    ambiguousPreview.plan.missingFields.includes("categoryTierDefinitions")
   );
 
   const continuedPreview = await executeAction(
@@ -412,7 +457,7 @@ test("preview no escribe y apply crea categorias, tickets, pagos y timing verifi
     }
   );
   assert.equal(continuedPreview.plan.events.length, 2);
-  assert.equal(continuedPreview.plan.tickets.length, 4);
+  assert.equal(continuedPreview.plan.tickets.length, 2);
   assert.equal(continuedPreview.plan.competition.organizer.id, 9407);
 
   const result = await executeAction(
@@ -426,7 +471,7 @@ test("preview no escribe y apply crea categorias, tickets, pagos y timing verifi
   assert.equal(result.competitionId, 561);
   assert.equal(result.complete, true);
   assert.equal(result.needsRepair, false);
-  assert.equal(createdTickets.length, 4);
+  assert.equal(createdTickets.length, 2);
 
   const setup = calls.find(
     (call) =>
@@ -435,23 +480,30 @@ test("preview no escribe y apply crea categorias, tickets, pagos y timing verifi
   );
   assert.equal(setup.data.competition.status, "published");
   assert.equal(setup.data.events.length, 2);
-  assert.equal(setup.data.events[0].categories.length, 4);
-  assert.equal(setup.data.events[1].categories.length, 6);
+  assert.equal(setup.data.events[0].categories.length, 3);
+  assert.equal(setup.data.events[1].categories.length, 5);
   assert.deepEqual(
     setup.data.events[0].categories.map(
       (row) => row.category.gender_rule
     ),
-    ["Femenino", "Masculino", "Femenino", "Masculino"]
+    ["Femenino", "Masculino", "Masculino"]
   );
 
-  const duplasOpen = createdTickets.find(
-    (ticket) => ticket.title === "Duplas Open"
+  const duplasTicket = createdTickets.find(
+    (ticket) => ticket.title === "Duplas"
   );
-  assert.equal(duplasOpen.price, 340);
-  assert.equal(duplasOpen.metadata_json.team_size, 2);
-  assert.equal(duplasOpen.event_bindings[0].category_ids.length, 3);
+  assert.equal(duplasTicket.price, 340);
+  assert.equal(duplasTicket.metadata_json.team_size, 2);
+  assert.equal(duplasTicket.event_bindings[0].category_ids.length, 5);
   assert.equal(result.verification.checks.paymentMatches, true);
   assert.equal(result.verification.checks.eventsComplete, true);
+  assert.equal(result.verification.checks.ticketsComplete, true);
+  assert.ok(
+    result.tickets.every(
+      (ticket) =>
+        ticket.eventBindingMatches && ticket.categoryBindingsMatch
+    )
+  );
 
   const resumed = await executeAction(
     "TIMER",
@@ -463,7 +515,7 @@ test("preview no escribe y apply crea categorias, tickets, pagos y timing verifi
   );
   assert.equal(resumed.resumed, true);
   assert.equal(resumed.complete, true);
-  assert.equal(createdTickets.length, 4);
+  assert.equal(createdTickets.length, 2);
   assert.equal(
     calls.filter(
       (call) =>
