@@ -209,6 +209,14 @@ function optionScore(option, query) {
   const normalizedQuery = normalizeText(query);
   if (!normalizedOption || !normalizedQuery) return 0;
   if (normalizedOption === normalizedQuery) return 100;
+  const optionWords = normalizedOption.split(/\s+/).filter(Boolean);
+  if (
+    optionWords.length > 1 &&
+    (normalizedQuery.startsWith(normalizedOption) ||
+      normalizedOption.startsWith(normalizedQuery))
+  ) {
+    return 95;
+  }
   if (normalizedOption.includes(normalizedQuery) || normalizedQuery.includes(normalizedOption)) return 85;
   const compactOption = normalizedOption.replace(/[^a-z0-9]+/g, "");
   const compactQuery = normalizedQuery.replace(/[^a-z0-9]+/g, "");
@@ -441,6 +449,24 @@ function competitionScore(competition, query) {
 
   const matched = queryTokens.filter((token) => nameTokens.has(token)).length;
   const coverage = matched / queryTokens.length;
+  const queryWithoutYear = queryTokens.filter((token) => !/^(?:19|20)\d{2}$/.test(token));
+  const nameWithoutYear = new Set(
+    [...nameTokens].filter((token) => !/^(?:19|20)\d{2}$/.test(token))
+  );
+  const baseCoverage = queryWithoutYear.length
+    ? queryWithoutYear.filter((token) => nameWithoutYear.has(token)).length /
+      queryWithoutYear.length
+    : 0;
+  const requestedYear = queryTokens.find((token) => /^(?:19|20)\d{2}$/.test(token));
+  const competitionYear = String(
+    competition.start_date || competition.date || ""
+  ).slice(0, 4);
+  if (
+    baseCoverage === 1 &&
+    (!requestedYear || !competitionYear || requestedYear === competitionYear)
+  ) {
+    return 98;
+  }
   return coverage >= 0.6 ? Math.round(coverage * 90) : 0;
 }
 
@@ -478,7 +504,12 @@ async function requestAllPages(path, params = {}, limit = 500) {
 
 function legacyCompetitionId(competition = {}) {
   const match = String(competition.slug || "").match(/-(\d+)$/);
-  return match ? Number(match[1]) : null;
+  if (!match) return null;
+  const value = Number(match[1]);
+  const competitionYear = Number(
+    String(competition.start_date || competition.date || "").slice(0, 4)
+  );
+  return value === competitionYear ? null : value;
 }
 
 function mapCompetition(competition = {}) {
@@ -547,12 +578,20 @@ async function findCompetition(input) {
 
   if (wantedId) {
     const foundById = competitions.find((item) => String(item.id) === String(wantedId));
-    if (foundById) return { match: foundById, candidates: [foundById] };
+    if (
+      foundById &&
+      (!query || competitionScore(foundById, rawQuery || query) >= 60)
+    ) {
+      return { match: foundById, candidates: [foundById] };
+    }
 
     const foundByLegacyId = competitions.find(
       (item) => String(item.legacyId ?? legacyCompetitionId(item)) === String(wantedId)
     );
-    if (foundByLegacyId) {
+    if (
+      foundByLegacyId &&
+      (!query || competitionScore(foundByLegacyId, rawQuery || query) >= 60)
+    ) {
       return {
         match: foundByLegacyId,
         candidates: [foundByLegacyId],
@@ -573,9 +612,21 @@ async function findCompetition(input) {
   return { match: ambiguous ? null : best || null, candidates: candidates.slice(0, 10), ambiguous };
 }
 
-async function resolveCompetitionInput(input = {}) {
-  if (input._competitionResolved) return input;
+async function resolveCompetitionInput(input = {}, { domain = "catalog" } = {}) {
+  if (input._competitionResolved && input._competitionDomain === domain) {
+    return input;
+  }
   const requestedCompetitionId = input.competitionId || input.competition_id || input.competition;
+  if (domain === "registration" && requestedCompetitionId) {
+    return {
+      ...input,
+      competitionId: requestedCompetitionId,
+      competition_id: requestedCompetitionId,
+      _competitionResolved: true,
+      _competitionDomain: domain,
+      _requestedCompetitionId: requestedCompetitionId,
+    };
+  }
   const resolution = await findCompetition({
     competitionId: requestedCompetitionId,
     competitionName: input.competitionName || input.eventCompetitionName,
@@ -586,22 +637,33 @@ async function resolveCompetitionInput(input = {}) {
     throw new Error(`No se encontro la competencia ${requestedCompetitionId || input.competitionName || "solicitada"}.`);
   }
 
+  const resolvedCompetitionId =
+    domain === "registration"
+      ? resolution.match.legacyId || resolution.match.id
+      : resolution.match.id;
   return {
     ...input,
-    competitionId: resolution.match.id,
-    competition_id: resolution.match.id,
+    competitionId: resolvedCompetitionId,
+    competition_id: resolvedCompetitionId,
     _competitionResolved: true,
+    _competitionDomain: domain,
     _requestedCompetitionId: requestedCompetitionId || null,
     _resolvedCompetition: resolution.match,
   };
 }
 
 async function getCompetitionEvents(input) {
-  const resolvedInput = await resolveCompetitionInput(input);
-  const competitionId = pickCompetitionId(resolvedInput);
+  const catalogInput = await resolveCompetitionInput(input);
+  const registrationInput = await resolveCompetitionInput(input, {
+    domain: "registration",
+  });
+  const competitionId = pickCompetitionId(catalogInput);
+  const registrationCompetitionId = pickCompetitionId(registrationInput);
   const [events, tickets] = await Promise.all([
     requestAllPages("/catalog/api/v1/events/", { competition_id: Number(competitionId) }),
-    requestAllPages("/registration/api/v1/tickets/", { competition_id: Number(competitionId) }),
+    requestAllPages("/registration/api/v1/tickets/", {
+      competition_id: Number(registrationCompetitionId),
+    }),
   ]);
 
   return events.map((event) => ({
@@ -614,14 +676,22 @@ async function getCompetitionEvents(input) {
           ...(Array.isArray(ticket.event_ids) ? ticket.event_ids : []),
           ...(Array.isArray(ticket.event_bindings) ? ticket.event_bindings.map((item) => item.event_id) : []),
         ];
-        return eventIds.length === 0 || eventIds.some((id) => String(id) === String(event.id));
+        const ticketLabel = normalizeText(ticket.title || ticket.name);
+        const eventLabel = normalizeText(event.name);
+        return (
+          eventIds.length === 0 ||
+          eventIds.some((id) => String(id) === String(event.id)) ||
+          (ticketLabel && eventLabel && ticketLabel === eventLabel)
+        );
       })
       .map(normalizeTicket),
   }));
 }
 
 async function getTickets(input) {
-  const resolvedInput = await resolveCompetitionInput(input);
+  const resolvedInput = await resolveCompetitionInput(input, {
+    domain: "registration",
+  });
   const competitionId = pickCompetitionId(resolvedInput);
   const tickets = await requestAllPages("/registration/api/v1/tickets/", {
     competition_id: Number(competitionId),
@@ -679,8 +749,8 @@ function bestCatalogMatch(items, query, getLabel, label, { minScore = 55, fallba
 function parseCompetitionDate(value) {
   const text = clean(value);
   if (!text) return null;
-  const iso = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (iso) return text;
+  const iso = text.match(/^(\d{4})-(\d{2})-(\d{2})(?:T.*)?$/);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
 
   const numeric = text.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
   if (numeric) {
@@ -976,11 +1046,13 @@ function applyTicketPatch(ticket, input) {
 async function updateEventTicket(input) {
   const resolvedInput = await resolveCompetitionInput(input);
   const competitionId = pickCompetitionId(resolvedInput);
-  const events = await getCompetitionEvents(resolvedInput);
+  const events = await getCompetitionEvents(input);
   const event = input.eventId || input.eventName || input.distance
     ? matchByIdOrName(events, input.eventId, input.eventName || input.distance, "evento/distancia")
     : null;
-  const tickets = event?.tickets || (await getTickets(resolvedInput));
+  const tickets = event?.tickets?.length
+    ? event.tickets
+    : await getTickets(input);
   const ticket = matchByIdOrName(tickets, input.ticketId, input.ticketTitle || input.ticketName, "ticket");
   const { next, patch } = applyTicketPatch(ticket, input);
 
@@ -1583,6 +1655,11 @@ function catalogSummary(item, labelGetter) {
     : null;
 }
 
+function planCatalogName(value) {
+  if (value && typeof value === "object") return clean(value.name);
+  return clean(value);
+}
+
 function normalizeCompetitionPlanStatus(value) {
   const normalized = normalizeText(value || "draft");
   if (["publicado", "publicada", "published"].includes(normalized)) {
@@ -1593,7 +1670,9 @@ function normalizeCompetitionPlanStatus(value) {
 
 async function previewCompetitionSetup(input = {}) {
   const previousPlan =
-    input.plan?.version === COMPETITION_PLAN_VERSION ? input.plan : null;
+    input.plan?.competition && typeof input.plan.competition === "object"
+      ? input.plan
+      : null;
   if (previousPlan) {
     const previousStartTime =
       String(previousPlan.competition?.startAt || "").match(/T(\d{2}:\d{2})/)?.[1] ||
@@ -1620,19 +1699,19 @@ async function previewCompetitionSetup(input = {}) {
       country:
         input.country ||
         input.countryName ||
-        previousPlan.competition?.country?.name,
+        planCatalogName(previousPlan.competition?.country),
       city:
         input.city ||
         input.cityName ||
-        previousPlan.competition?.city?.name,
+        planCatalogName(previousPlan.competition?.city),
       sport:
         input.sport ||
         input.sportName ||
-        previousPlan.competition?.sport?.name,
+        planCatalogName(previousPlan.competition?.sport),
       organizer:
         input.organizer ||
         input.organizerName ||
-        previousPlan.competition?.organizer?.name,
+        planCatalogName(previousPlan.competition?.organizer),
       status: input.status || previousPlan.competition?.status,
       visibility:
         input.visibility || previousPlan.competition?.visibility,
@@ -2990,19 +3069,64 @@ async function createCompetitionFromChat(input = {}) {
 }
 
 async function getInscription(input) {
-  const normalizedInput = await resolveCompetitionInput(normalizeDorsalReferences(input));
+  const normalizedInput = await resolveCompetitionInput(
+    normalizeDorsalReferences(input),
+    { domain: "registration" }
+  );
+  const competitionId = pickCompetitionId(normalizedInput);
+  const dorsal = normalizeDorsal(normalizedInput.dorsal || normalizedInput.bib);
+  if (!dorsal) throw new Error("Falta dorsal.");
+
   const request = {
-    path: "/registration/api/v1/inscriptions/detail-verify/",
+    path: "/registration/api/v1/inscriptions/",
     params: {
-      competition: pickCompetitionId(normalizedInput),
-      competition_id: Number(pickCompetitionId(normalizedInput)),
-      dorsal: normalizedInput.dorsal || normalizedInput.bib,
+      competition_id: Number(competitionId),
+      limit: 500,
+      offset: 0,
     },
   };
-  const response = await apiRequest(request);
+  const rows = await requestAllPages(request.path, {
+    competition_id: Number(competitionId),
+  });
+  const matches = rows.filter((row) => {
+    const document = pickInscriptionDocument(row);
+    const participant = pickParticipant(row);
+    const rowDorsal = normalizeDorsal(
+      row.dorsal ||
+        row.bib ||
+        document.dorsal ||
+        document._dorsal ||
+        document.bib ||
+        participant.dorsal ||
+        participant.bib
+    );
+    return rowDorsal && String(rowDorsal) === String(dorsal);
+  });
+
+  let timingResult = null;
+  if (!matches.length) {
+    const results = await getResults({
+      competitionId,
+      dorsal,
+      _competitionResolved: true,
+    });
+    timingResult = results[0] || null;
+  }
+
   return {
-    ...buildAudit({ path: request.path, params: request.params, response }),
-    data: response,
+    ...buildAudit({
+      path: request.path,
+      params: request.params,
+      response: { count: rows.length, matched: matches.length },
+    }),
+    found: matches.length === 1,
+    ambiguous: matches.length > 1,
+    competitionId: Number(competitionId),
+    dorsal: String(dorsal),
+    bestMatch: matches.length === 1 ? summarizeInscription(matches[0]) : null,
+    candidates: matches.slice(0, 5).map((row) => summarizeInscription(row)),
+    resultFound: Boolean(timingResult),
+    timingResult,
   };
 }
 
@@ -3043,7 +3167,7 @@ function inscriptionFullName(inscription = {}) {
 }
 
 function requestedInscriptionReference(input = {}) {
-  return clean(
+  const value = clean(
     input.inscriptionId ||
       input.inscription_id ||
       input.inscriptionReference ||
@@ -3052,13 +3176,24 @@ function requestedInscriptionReference(input = {}) {
       input.codigo ||
       input.pk
   );
+  if (!value) return null;
+  const normalized = value.replace(/^#/, "");
+  if (/\s/.test(normalized)) return null;
+  if (/^\d+$/.test(normalized) && normalized.length < 4) return null;
+  if (!/^[a-z0-9-]{4,}$/i.test(normalized)) return null;
+  return normalized;
 }
 
 function buildInscriptionSearchTerms(input = {}) {
   return {
     reference: requestedInscriptionReference(input),
     document: clean(input.document || input.dni || input.identityDocument),
-    email: clean(input.email || input.expectedEmail || input.correctEmail || input.requestedEmail),
+    email: clean(
+      input.lookupEmail ||
+        input.currentEmail ||
+        input.expectedEmail ||
+        input.email
+    ),
     phone: clean(input.phone || input.telefono || input.celular),
     name: clean(input.participantName || input.athleteName || input.name),
   };
@@ -3067,6 +3202,7 @@ function buildInscriptionSearchTerms(input = {}) {
 function scoreInscription(inscription, terms) {
   let score = 0;
   const reasons = [];
+  const conflicts = [];
   const document = pickInscriptionDocument(inscription);
   const participant = pickParticipant(inscription);
 
@@ -3085,6 +3221,8 @@ function scoreInscription(inscription, terms) {
     if (wanted && candidates.includes(wanted)) {
       score += 120;
       reasons.push("reference");
+    } else if (wanted && candidates.some(Boolean)) {
+      conflicts.push("reference");
     }
   }
 
@@ -3096,6 +3234,8 @@ function scoreInscription(inscription, terms) {
     if (wanted && current && wanted === current) {
       score += 100;
       reasons.push("document");
+    } else if (wanted && current) {
+      conflicts.push("document");
     }
   }
 
@@ -3105,6 +3245,8 @@ function scoreInscription(inscription, terms) {
     if (wanted && current && wanted === current) {
       score += 80;
       reasons.push("email");
+    } else if (wanted && current) {
+      conflicts.push("email");
     }
   }
 
@@ -3114,19 +3256,32 @@ function scoreInscription(inscription, terms) {
     if (wanted && current && (wanted === current || wanted.endsWith(current) || current.endsWith(wanted))) {
       score += 70;
       reasons.push("phone");
+    } else if (wanted && current) {
+      conflicts.push("phone");
     }
   }
 
   if (terms.name) {
     const wanted = normalizeLoose(terms.name);
     const current = normalizeLoose(inscriptionFullName(inscription));
-    if (wanted.length >= 4 && current && (current.includes(wanted) || wanted.includes(current))) {
+    const wantedTokens = tokenize(terms.name);
+    const currentTokens = new Set(tokenize(inscriptionFullName(inscription)));
+    const tokenMatch =
+      wantedTokens.length > 0 &&
+      wantedTokens.every((token) => currentTokens.has(token));
+    if (
+      wanted.length >= 4 &&
+      current &&
+      (current.includes(wanted) || wanted.includes(current) || tokenMatch)
+    ) {
       score += 45;
       reasons.push("name");
+    } else if (wanted.length >= 4 && current) {
+      conflicts.push("name");
     }
   }
 
-  return { score, reasons };
+  return { score, reasons, conflicts };
 }
 
 function summarizeInscription(inscription = {}, terms = {}) {
@@ -3173,7 +3328,9 @@ function summarizeInscription(inscription = {}, terms = {}) {
 }
 
 async function getInscriptionByReferenceOrDocument(input = {}) {
-  const resolvedInput = await resolveCompetitionInput(input);
+  const resolvedInput = await resolveCompetitionInput(input, {
+    domain: "registration",
+  });
   const competitionId = pickCompetitionId(resolvedInput);
   const terms = buildInscriptionSearchTerms(input);
   if (!Object.values(terms).some(Boolean)) {
@@ -3186,10 +3343,14 @@ async function getInscriptionByReferenceOrDocument(input = {}) {
   };
   const response = await requestAllPages(request.path, { competition_id: Number(competitionId) });
   const rows = asArray(response);
-  const scored = rows
+  const ranked = rows
     .map((row) => ({ row, ...scoreInscription(row, terms) }))
     .filter((item) => item.score > 0)
-    .sort((a, b) => b.score - a.score);
+    .sort((a, b) => {
+      const conflictDifference = a.conflicts.length - b.conflicts.length;
+      return conflictDifference || b.score - a.score;
+    });
+  const scored = ranked.filter((item) => item.conflicts.length === 0);
 
   const best = scored[0] || null;
   const second = scored[1] || null;
@@ -3203,26 +3364,69 @@ async function getInscriptionByReferenceOrDocument(input = {}) {
     competitionId: Number(competitionId),
     search: terms,
     bestMatch: found ? summarizeInscription(best.row, terms) : null,
-    candidates: scored.slice(0, 5).map((item) => ({
+    candidates: ranked.slice(0, 5).map((item) => ({
       score: item.score,
       reasons: item.reasons,
+      conflicts: item.conflicts,
       inscription: summarizeInscription(item.row, terms),
     })),
   };
 }
 
 function pickPaymentEvidence(input = {}) {
-  const evidence = input.paymentEvidence && typeof input.paymentEvidence === "object" ? input.paymentEvidence : {};
+  const rawEvidence = input.paymentEvidence;
+  const evidence =
+    rawEvidence && typeof rawEvidence === "object" ? rawEvidence : {};
+  const evidenceText = [
+    typeof rawEvidence === "string" ? rawEvidence : "",
+    evidence.summary,
+    evidence.evidenceSummary,
+    ...(Array.isArray(evidence.visibleText) ? evidence.visibleText : []),
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const parsedAmount =
+    evidenceText.match(/\bS\/\s*([0-9]+(?:[.,][0-9]{1,2})?)/i)?.[1] ||
+    evidenceText.match(/\b(?:monto|total)\s*:?\s*([0-9]+(?:[.,][0-9]{1,2})?)/i)?.[1];
+  const parsedOperation =
+    evidenceText.match(
+      /(?:n(?:ro|umero)?\.?\s*(?:de\s*)?operaci[oó]n|operaci[oó]n)\s*:?\s*([a-z0-9-]+)/i
+    )?.[1];
+  const confidence = Number(
+    input.evidenceConfidence ??
+      evidence.evidenceConfidence ??
+      evidence.confidence ??
+      0
+  );
   return {
-    amount: clean(input.paymentAmount || input.amount || evidence.amount),
-    operationNumber: clean(input.operationNumber || evidence.operationNumber),
+    amount: clean(
+      input.paymentAmount ||
+        input.amount ||
+        evidence.amount ||
+        parsedAmount?.replace(",", ".")
+    ),
+    operationNumber: clean(
+      input.operationNumber || evidence.operationNumber || parsedOperation
+    ),
     date: clean(input.paymentDate || evidence.date),
     time: clean(input.paymentTime || evidence.time),
-    type: clean(input.paymentType || evidence.type),
-    confidence: Number(input.evidenceConfidence ?? evidence.confidence ?? 0),
-    summary: clean(input.evidenceSummary || evidence.evidenceSummary || evidence.summary),
+    type: clean(
+      input.paymentType ||
+        evidence.type ||
+        evidence.mediaType ||
+        (typeof rawEvidence === "string" ? "TEXT" : null)
+    ),
+    confidence,
+    summary: clean(
+      input.evidenceSummary ||
+        evidence.evidenceSummary ||
+        evidence.summary ||
+        (typeof rawEvidence === "string" ? rawEvidence : null)
+    ),
     hasStrongEvidence:
-      input.hasStrongEvidence === true || evidence.hasStrongEvidence === true || Number(evidence.confidence) >= 0.85,
+      input.hasStrongEvidence === true ||
+      evidence.hasStrongEvidence === true ||
+      confidence >= 0.85,
   };
 }
 
@@ -3232,13 +3436,19 @@ async function validatePaymentEvidence(input = {}) {
   const match = lookup.bestMatch;
   let commerceOrder = null;
   let commercePayments = [];
+  let ticket = null;
   if (match?.commerceOrderId) {
     [commerceOrder, commercePayments] = await Promise.all([
       apiRequest({ path: `/commerce/api/v1/orders/${match.commerceOrderId}` }).catch(() => null),
       requestAllPages("/commerce/api/v1/orders/payments/", { order_id: Number(match.commerceOrderId) }).catch(() => []),
     ]);
   }
-  const expectedRaw = String(match?.amount || "").replace(/[^\d.]+/g, "");
+  if (match?.ticketId && !match?.amount) {
+    ticket = await apiRequest({
+      path: `/registration/api/v1/tickets/${match.ticketId}`,
+    }).catch(() => null);
+  }
+  const expectedRaw = String(match?.amount || ticket?.price || "").replace(/[^\d.]+/g, "");
   const paidRaw = String(evidence.amount || "").replace(/[^\d.]+/g, "");
   const expectedAmount = expectedRaw ? Number(expectedRaw) : null;
   const paidAmount = paidRaw ? Number(paidRaw) : null;
@@ -3290,6 +3500,7 @@ async function validatePaymentEvidence(input = {}) {
     commerce: {
       order: commerceOrder,
       payments: commercePayments,
+      ticket,
     },
     lookup,
   };
@@ -3572,8 +3783,32 @@ async function sendInscriptionConfirmationWhatsApp(input = {}) {
 
 async function getResults(input) {
   const resolvedInput = await resolveCompetitionInput(input);
-  return requestAllPages("/timing/api/v1/results/admin/", {
+  const rows = await requestAllPages("/timing/api/v1/results/admin/", {
     competition_id: Number(pickCompetitionId(resolvedInput)),
+  });
+  const dorsals = [
+    resolvedInput.dorsal,
+    resolvedInput.bib,
+    resolvedInput.currentDorsal,
+    resolvedInput.oldDorsal,
+    resolvedInput.previousDorsal,
+    ...(Array.isArray(resolvedInput.detectedDorsals)
+      ? resolvedInput.detectedDorsals
+      : []),
+  ]
+    .map(normalizeDorsal)
+    .filter(Boolean);
+  const targets = new Set(dorsals.map(String));
+  if (!targets.size) return rows;
+
+  return rows.filter((row) => {
+    const rowDorsal = normalizeDorsal(
+      row?.dorsal ?? row?.bib ?? row?.participant?.dorsal
+    );
+    const rowChip = normalizeDorsal(row?.chip);
+    return [rowDorsal, rowChip].some(
+      (value) => value && targets.has(String(value))
+    );
   });
 }
 
@@ -3830,8 +4065,13 @@ function parseLocalDateTime(value) {
   const raw = String(value || "").trim();
   if (!raw) return null;
 
-  const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})[T\s](\d{1,2}):(\d{2})(?::(\d{2}))?(?:([+-]\d{2}:\d{2})|Z)?/);
+  const iso = raw.match(
+    /^(\d{4})-(\d{2})-(\d{2})[T\s](\d{1,2}):(\d{2})(?::(\d{2}))?((?:[+-]\d{2}:\d{2})|Z)?/
+  );
   if (iso) {
+    if (iso[7] === "Z") {
+      return utcMsToDateParts(Date.parse(raw), "-05:00");
+    }
     return {
       date: { year: Number(iso[1]), month: Number(iso[2]), day: Number(iso[3]) },
       time: { hours: Number(iso[4]), minutes: Number(iso[5]), seconds: Number(iso[6] || 0) },
@@ -3900,7 +4140,12 @@ function pickEventStartDateTime(detail = {}, input = {}) {
   const parsedRawSalida = parseLocalDateTime(salidaRaw?.hour || salidaRaw?.zulu);
   if (parsedRawSalida) return parsedRawSalida;
 
-  return parseLocalDateTime(input.startDateTime || input.salidaDateTime);
+  return parseLocalDateTime(
+    input.startDateTime ||
+      input.salidaDateTime ||
+      detail?.event?.start_at ||
+      detail?.event?.startAt
+  );
 }
 
 function pickCompetitionDate(input = {}, detail = {}) {
@@ -3928,14 +4173,47 @@ function buildEvidenceFinishDateTime(input = {}, detail = {}) {
 
   const elapsedSeconds = parseDurationSeconds(input.gpsElapsedTime || input.evidenceElapsedTime || input.requestedValue);
   const eventStart = pickEventStartDateTime(detail, input);
-  if (eventStart && elapsedSeconds != null && input.preferActivityStartForGps !== true) {
-    return utcMsToDateParts(datePartsToUtcMs(eventStart) + elapsedSeconds * 1000, eventStart.offset || input.timezoneOffset || "-05:00");
+  const activityStartValue =
+    input.activityStartDateTime ||
+    input.activityStartTime ||
+    input.gpsStartDateTime;
+  let activityStart = parseLocalDateTime(activityStartValue);
+  if (!activityStart && activityStartValue) {
+    const activityTime = parseHms(activityStartValue);
+    const activityDate = pickCompetitionDate(input, detail);
+    if (activityTime && activityDate) {
+      activityStart = {
+        date: activityDate,
+        time: activityTime,
+        offset: input.timezoneOffset || "-05:00",
+      };
+    }
   }
 
-  const activityStart = parseLocalDateTime(input.activityStartDateTime || input.activityStartTime || input.gpsStartDateTime);
-  if (activityStart && elapsedSeconds != null) {
-    return utcMsToDateParts(datePartsToUtcMs(activityStart) + elapsedSeconds * 1000, activityStart.offset || input.timezoneOffset || "-05:00");
+  if (
+    activityStart &&
+    elapsedSeconds != null &&
+    input.preferActivityStartForGps === true
+  ) {
+    return utcMsToDateParts(
+      datePartsToUtcMs(activityStart) + elapsedSeconds * 1000,
+      activityStart.offset || input.timezoneOffset || "-05:00"
+    );
   }
+  if (eventStart && elapsedSeconds != null) {
+    return utcMsToDateParts(
+      datePartsToUtcMs(eventStart) + elapsedSeconds * 1000,
+      eventStart.offset || input.timezoneOffset || "-05:00"
+    );
+  }
+  if (activityStart && elapsedSeconds != null) {
+    return utcMsToDateParts(
+      datePartsToUtcMs(activityStart) + elapsedSeconds * 1000,
+      activityStart.offset || input.timezoneOffset || "-05:00"
+    );
+  }
+
+  if (elapsedSeconds != null) return null;
 
   const time = parseHms(
     input.evidenceFinishTime ||
@@ -4499,13 +4777,22 @@ function hasStrongTimeEvidence(input = {}) {
 }
 
 function pickOfficialSeconds(input = {}, detail = {}) {
+  const officialMilliseconds = Number(
+    input.officialTimeMs ??
+      input.official_time_ms ??
+      detail?.official_time_ms
+  );
   return (
     parseDurationSeconds(input.currentValue) ??
     parseDurationSeconds(input.currentOfficialTime) ??
     parseDurationSeconds(input.officialTime) ??
     parseDurationSeconds(detail?.tiempo_oficial) ??
     parseDurationSeconds(detail?.officialTime) ??
-    parseDurationSeconds(detail?.document?.time_TOTAL)
+    (Number.isFinite(officialMilliseconds) && officialMilliseconds > 0
+      ? officialMilliseconds / 1000
+      : null) ??
+    parseDurationSeconds(detail?.document?.time_TOTAL) ??
+    parseDurationSeconds(detail?.display_document?.time_TOTAL)
   );
 }
 
@@ -4520,6 +4807,15 @@ function pickRequestedSeconds(input = {}) {
 }
 
 function indicatesMissingOfficialTime(input = {}, detail = {}) {
+  const officialMilliseconds = Number(
+    input.officialTimeMs ??
+      input.official_time_ms ??
+      detail?.official_time_ms
+  );
+  if (Number.isFinite(officialMilliseconds) && officialMilliseconds > 0) {
+    return false;
+  }
+
   const values = [
     input.currentValue,
     input.currentOfficialTime,
@@ -4527,10 +4823,17 @@ function indicatesMissingOfficialTime(input = {}, detail = {}) {
     detail?.tiempo_oficial,
     detail?.officialTime,
     detail?.document?.time_TOTAL,
+    detail?.display_document?.time_TOTAL,
   ].filter((value) => value !== undefined && value !== null && String(value).trim() !== "");
 
   if (!values.length) return true;
-  return values.some((value) => /no\s*(especificado|registrado|tiene)|sin\s*tiempo|n\/a|null/i.test(String(value)));
+  return values.some((value) => {
+    const normalized = String(value).trim();
+    return (
+      /no\s*(especificado|registrado|tiene)|sin\s*tiempo|n\/a|null/i.test(normalized) ||
+      /^(?:0+:)?00:00(?:\.0+)?$/.test(normalized)
+    );
+  });
 }
 
 function buildTimeCorrectionCurrent({ input, detail, finishParts }) {
@@ -4552,7 +4855,13 @@ async function applyResultTimeEvidenceCorrection(input = {}) {
   const { resultId, detail } = await resolveResultForUpdate(normalizedInput);
   const trustAssessment = buildAthleteEvidenceTrustAssessment(normalizedInput, detail);
   if (trustAssessment.enabled && normalizedInput.preferActivityStartForGps == null) {
-    normalizedInput.preferActivityStartForGps = true;
+    normalizedInput.preferActivityStartForGps = Boolean(
+      parseLocalDateTime(
+        normalizedInput.activityStartDateTime ||
+          normalizedInput.activityStartTime ||
+          normalizedInput.gpsStartDateTime
+      )
+    );
   }
   const dorsal = normalizeDorsal(
     normalizedInput.dorsal ||
@@ -4621,6 +4930,31 @@ async function applyResultTimeEvidenceCorrection(input = {}) {
     name_colum: normalizedInput.name_colum || normalizedInput.nameColumn || "loc_Meta",
   };
   const editResponse = await editResultTime(editPayload);
+  const verificationDetail = firstDetail(
+    await getResultDetail({ resultId }).catch(() => null)
+  );
+  const verifiedOfficialSeconds = verificationDetail
+    ? pickOfficialSeconds({}, verificationDetail)
+    : null;
+  const verificationDifferenceSeconds =
+    verifiedOfficialSeconds == null
+      ? null
+      : Math.abs(verifiedOfficialSeconds - proposedSeconds);
+  const verification = {
+    verified:
+      verificationDifferenceSeconds != null &&
+      verificationDifferenceSeconds <= 2,
+    officialTime:
+      verifiedOfficialSeconds == null
+        ? null
+        : formatDuration(verifiedOfficialSeconds),
+    finishAt:
+      verificationDetail?.hora_meta ||
+      verificationDetail?.finish_at ||
+      null,
+    state: verificationDetail?.state || null,
+    differenceSeconds: verificationDifferenceSeconds,
+  };
 
   return {
     created: true,
@@ -4637,7 +4971,9 @@ async function applyResultTimeEvidenceCorrection(input = {}) {
       createdRawId: rawId,
       assignedColumn: editPayload.name_colum,
       computedTimeCurrent: timeCurrent,
+      after: verification,
     },
+    verification,
     raw: {
       endpoint: "/timing/api/v1/raws/",
       payload: rawPayload,

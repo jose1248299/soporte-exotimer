@@ -1,3 +1,4 @@
+const crypto = require("node:crypto");
 const prisma = require("../lib/prisma");
 const config = require("../config");
 const {
@@ -83,8 +84,46 @@ function compactMessage(message) {
 }
 
 function mergeActionInput(previousInput = {}, nextInput = {}) {
+  const identityKeys = [
+    "inscriptionId",
+    "inscription_id",
+    "inscriptionReference",
+    "reference",
+    "codigoInscripcion",
+    "codigo",
+    "pk",
+    "document",
+    "dni",
+    "identityDocument",
+    "email",
+    "expectedEmail",
+    "phone",
+    "telefono",
+    "celular",
+    "participantName",
+    "athleteName",
+  ];
+  const normalizeIdentity = (value) =>
+    String(value || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9@]+/gi, "")
+      .toLowerCase();
+  const identityChanged = identityKeys.some(
+    (key) =>
+      nextInput[key] != null &&
+      previousInput[key] != null &&
+      normalizeIdentity(nextInput[key]) !== normalizeIdentity(previousInput[key])
+  );
+  const safePrevious = identityChanged
+    ? Object.fromEntries(
+        Object.entries(previousInput).filter(
+          ([key]) => !identityKeys.includes(key)
+        )
+      )
+    : previousInput;
   const merged = {
-    ...previousInput,
+    ...safePrevious,
     ...nextInput,
   };
   if (nextInput.competitionId || nextInput.competition_id || nextInput.competition) {
@@ -94,6 +133,227 @@ function mergeActionInput(previousInput = {}, nextInput = {}) {
   return Object.fromEntries(
     Object.entries(merged).filter(([, value]) => value !== undefined && value !== null && value !== "")
   );
+}
+
+function stableActionValue(value) {
+  if (Array.isArray(value)) return value.map(stableActionValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value)
+        .filter(
+          (key) =>
+            ![
+              "confirmed",
+              "forceRetry",
+              "missingFields",
+              "policy",
+              "_idempotencyKey",
+            ].includes(key)
+        )
+        .sort()
+        .map((key) => [key, stableActionValue(value[key])])
+    );
+  }
+  return value;
+}
+
+function actionIdempotencyKey(actionName, input = {}) {
+  return crypto
+    .createHash("sha256")
+    .update(
+      JSON.stringify({
+        actionName,
+        input: stableActionValue(input),
+      })
+    )
+    .digest("hex")
+    .slice(0, 32);
+}
+
+const IDEMPOTENT_ACTIONS = new Set([
+  "EXOTIMER_CREATE_RESULT_CORRECTION_CASE",
+  "EXOTIMER_VALIDATE_PAYMENT_EVIDENCE",
+  "EXOTIMER_UPDATE_INSCRIPTION_EMAIL",
+  "EXOTIMER_UPDATE_INSCRIPTION_EVENT_CATEGORY",
+  "EXOTIMER_RESEND_INSCRIPTION_CONFIRMATION",
+  "EXOTIMER_SEND_INSCRIPTION_CONFIRMATION_WHATSAPP",
+  "EXOTIMER_UPDATE_RESULT_PARTICIPANT_DATA",
+  "EXOTIMER_UPDATE_RESULT_DORSAL",
+  "EXOTIMER_UPDATE_RESULT_EVENT_CATEGORY",
+  "EXOTIMER_CREATE_MANUAL_RAW",
+  "EXOTIMER_EDIT_RESULT_TIME",
+  "EXOTIMER_APPLY_RESULT_TIME_EVIDENCE_CORRECTION",
+]);
+
+function storedActionOutput(actionName, input = {}, result) {
+  if (Array.isArray(result)) {
+    const endpointByAction = {
+      EXOTIMER_GET_TICKETS: "/registration/api/v1/tickets/",
+      EXOTIMER_GET_RESULTS: "/timing/api/v1/results/admin/",
+      EXOTIMER_GET_COMPETITION_EVENTS: "/catalog/api/v1/events/",
+    };
+    const endpoint = endpointByAction[actionName];
+    return {
+      ...(endpoint
+        ? {
+            request: {
+              method: "GET",
+              endpoint,
+              params: {
+                competition_id:
+                  result[0]?.competition_id ||
+                  input.competitionId ||
+                  input.competition_id ||
+                  null,
+              },
+            },
+          }
+        : {}),
+      response: { count: result.length },
+      data: result,
+    };
+  }
+  if (
+    result &&
+    typeof result === "object" &&
+    !result.request &&
+    result.lookup?.request
+  ) {
+    return {
+      ...result,
+      request: result.lookup.request,
+    };
+  }
+  return result;
+}
+
+function planComparableValue(plan) {
+  if (!plan || typeof plan !== "object") return null;
+  return stableActionValue({
+    ...plan,
+    fingerprint: undefined,
+    readyToApply: undefined,
+    missingFields: undefined,
+    warnings: undefined,
+    duplicates: undefined,
+  });
+}
+
+function competitionPlanOverrides(plan = {}) {
+  const competition = plan.competition || {};
+  const planName = (value) =>
+    value && typeof value === "object" ? value.name : value;
+  const startTime =
+    String(competition.startAt || "").match(/T(\d{2}:\d{2})/)?.[1] || null;
+  const endTime =
+    String(competition.endAt || "").match(/T(\d{2}:\d{2})/)?.[1] || null;
+  return Object.fromEntries(
+    Object.entries({
+      competitionName: competition.name,
+      eventDate: competition.date,
+      startTime,
+      endTime,
+      venueName: competition.venueName,
+      country: planName(competition.country),
+      city: planName(competition.city),
+      sport: planName(competition.sport),
+      organizer: planName(competition.organizer),
+      status: competition.status,
+      visibility: competition.visibility,
+      website: competition.website,
+      registrationDeadline: competition.registrationDeadline,
+      events: plan.events,
+      tickets: plan.tickets,
+      payment: plan.payment,
+      format: plan.rules?.format,
+      workoutOrder: plan.rules?.workoutOrder,
+      waveSize: plan.rules?.waveSize,
+      rulesSummary: plan.rules?.notes,
+      bannerMessageId: plan.media?.bannerMessageId,
+      basesMessageId: plan.media?.basesMessageId,
+    }).filter(([, value]) => value !== undefined && value !== null)
+  );
+}
+
+async function prepareCompetitionSetupClassification(
+  conversation,
+  classification
+) {
+  if (
+    ![
+      "EXOTIMER_PREVIEW_COMPETITION_SETUP",
+      "EXOTIMER_APPLY_COMPETITION_SETUP",
+    ].includes(classification.action)
+  ) {
+    return classification;
+  }
+
+  const recentPreviews = await prisma.supportAction.findMany({
+    where: {
+      conversationId: conversation.id,
+      name: "EXOTIMER_PREVIEW_COMPETITION_SETUP",
+      status: "EXECUTED",
+    },
+    orderBy: { createdAt: "desc" },
+    take: 10,
+    select: { id: true, output: true },
+  });
+  const lastPreview = recentPreviews.find(
+    (action) => action.output?.plan
+  )?.output?.plan;
+  const lastReadyPlan = recentPreviews.find(
+    (action) =>
+      action.output?.readyToApply === true &&
+      action.output?.plan?.readyToApply === true
+  )?.output?.plan;
+  const proposedPlan = classification.actionInput?.plan;
+
+  if (classification.action === "EXOTIMER_APPLY_COMPETITION_SETUP") {
+    const proposedMatchesStored =
+      !proposedPlan ||
+      (lastReadyPlan &&
+        JSON.stringify(planComparableValue(proposedPlan)) ===
+          JSON.stringify(planComparableValue(lastReadyPlan)));
+    if (lastReadyPlan && proposedMatchesStored) {
+      return {
+        ...classification,
+        actionInput: {
+          ...(classification.actionInput || {}),
+          plan: lastReadyPlan,
+          confirmed: true,
+        },
+      };
+    }
+
+    return {
+      ...classification,
+      action: "EXOTIMER_PREVIEW_COMPETITION_SETUP",
+      needsHuman: false,
+      actionInput: {
+        ...(classification.actionInput || {}),
+        ...(proposedPlan ? competitionPlanOverrides(proposedPlan) : {}),
+        ...(lastPreview ? { plan: lastPreview } : {}),
+        confirmed: false,
+      },
+      summary: `${classification.summary || ""} Se regenerara un preview real antes de aplicar cambios.`.trim(),
+    };
+  }
+
+  if (!proposedPlan) return classification;
+  const proposedMatchesStored =
+    lastPreview &&
+    JSON.stringify(planComparableValue(proposedPlan)) ===
+      JSON.stringify(planComparableValue(lastPreview));
+  if (proposedMatchesStored) return classification;
+
+  return {
+    ...classification,
+    actionInput: {
+      ...(classification.actionInput || {}),
+      ...competitionPlanOverrides(proposedPlan),
+      ...(lastPreview ? { plan: lastPreview } : { plan: undefined }),
+    },
+  };
 }
 
 function mergeClassificationWithConversation(classification, conversation) {
@@ -390,12 +650,57 @@ function isResultFollowUpMessage(text = "", classification = {}) {
   return /(novedad|seguimiento|estado|avance|respuesta|ya.*revis|sigue|actualiz|mi caso|requesta|reclamo)/.test(normalized);
 }
 
+function normalizeDuration(value) {
+  const match = String(value || "").trim().match(/^(\d{1,3}):(\d{2})(?::(\d{2}))?$/);
+  if (!match) return null;
+  const seconds = match[3] === undefined
+    ? Number(match[1]) * 60 + Number(match[2])
+    : Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainingSeconds = seconds % 60;
+  return [hours, minutes, remainingSeconds]
+    .map((part) => String(part).padStart(2, "0"))
+    .join(":");
+}
+
+function formatOfficialMilliseconds(value) {
+  const milliseconds = Number(value);
+  if (!Number.isFinite(milliseconds) || milliseconds <= 0) return null;
+  const totalSeconds = Math.round(milliseconds / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return [hours, minutes, seconds]
+    .map((part) => String(part).padStart(2, "0"))
+    .join(":");
+}
+
 function pickResultOfficialTime(result = {}) {
-  return result.tiempo_oficial || result.officialTime || result.official_time || result.time || result.tiempo || null;
+  const direct = [
+    result.tiempo_oficial,
+    result.officialTime,
+    result.official_time,
+    result.time,
+    result.tiempo,
+    result.document?.time_TOTAL,
+    result.display_document?.time_TOTAL,
+  ]
+    .map(normalizeDuration)
+    .find(Boolean);
+  return direct || formatOfficialMilliseconds(result.official_time_ms);
 }
 
 function pickResultFinishTime(result = {}) {
-  return result.hora_meta || result.finishTime || result.finish_time || result.metaTime || null;
+  return (
+    result.hora_meta ||
+    result.finishTime ||
+    result.finish_time ||
+    result.finish_at ||
+    result.metaTime ||
+    null
+  );
 }
 
 function summarizeResultForClosure(result = {}) {
@@ -406,11 +711,29 @@ function summarizeResultForClosure(result = {}) {
     resultId: result.id || result.result_id || result.resultId,
     dorsal: result.dorsal ?? result.bib,
     chip: result.chip,
-    athleteName: participant.name || result.participantName || result.athleteName || result.name || null,
-    athleteLastname: participant.lastname || result.participantLastname || result.lastname || null,
-    distance: event.name || result.evento_distancia || result.salida || result.distance || null,
-    gender: category.genre || result.genero || result.gender || null,
-    category: category.name || result.categoria || result.category || null,
+    athleteName:
+      participant.name ||
+      participant.first_name ||
+      result.participantName ||
+      result.athleteName ||
+      result.participant_display_name ||
+      result.name ||
+      null,
+    athleteLastname:
+      participant.lastname ||
+      participant.last_name ||
+      result.participantLastname ||
+      result.lastname ||
+      null,
+    distance:
+      event.name ||
+      result.event_name ||
+      result.evento_distancia ||
+      result.salida ||
+      result.distance ||
+      null,
+    gender: category.genre || category.gender_rule || result.genero || result.gender || null,
+    category: category.name || result.category_name || result.categoria || result.category || null,
     officialTime: pickResultOfficialTime(result),
     finishTime: pickResultFinishTime(result),
     state: result.state || null,
@@ -419,17 +742,104 @@ function summarizeResultForClosure(result = {}) {
 
 function resultHasPublishedTime(result = {}) {
   const officialTime = pickResultOfficialTime(result);
-  return Boolean(officialTime && String(officialTime).trim());
+  if (officialTime) return true;
+  const state = String(result.state || result.status || "").toLowerCase();
+  return Boolean(
+    pickResultFinishTime(result) &&
+      ["finalizado", "finished", "completed"].includes(state)
+  );
 }
 
 function uniqueStrings(values = []) {
   return [...new Set(values.filter((value) => value !== undefined && value !== null && String(value).trim()).map((value) => String(value).trim()))];
 }
 
-async function resolveResultFollowUpIfAlreadyUpdated({ conversation, supportCase, classification, text, userType }) {
+function normalizeDorsalValue(value) {
+  return normalizeDorsalReferences({ dorsal: value }).dorsal || null;
+}
+
+function findResultByDorsals(rows, dorsals) {
+  const targets = new Set(dorsals.map(normalizeDorsalValue).filter(Boolean).map(String));
+  return rows.find((row) => {
+    const rowDorsal = normalizeDorsalValue(row.dorsal ?? row.bib);
+    const rowChip = normalizeDorsalValue(row.chip);
+    return [rowDorsal, rowChip].some((value) => value && targets.has(String(value)));
+  });
+}
+
+function isMissingResultClaim(text = "", classification = {}) {
   const input = classification.actionInput || {};
-  if (classification.userType !== "ATHLETE" && userType !== "ATHLETE") return null;
-  if (!isResultFollowUpMessage(text, classification)) return null;
+  const normalized = String(
+    [
+      text,
+      classification.intent,
+      classification.summary,
+      input.requestedCorrection,
+      input.caseType,
+      input.currentValue,
+    ]
+      .filter(Boolean)
+      .join(" ")
+  )
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+
+  return /crear participante|participante nuevo|crear (?:un )?resultado|no (?:me )?(?:aparece|sale|figura)|resultado (?:no|sin)|sin (?:resultado|tiempo)|tiempo (?:no|sin).*(?:public|registr|apare|sal)/.test(
+    normalized
+  );
+}
+
+function shouldPromoteTrustedTimeCorrection(classification, result) {
+  if (classification.action !== "EXOTIMER_CREATE_RESULT_CORRECTION_CASE") return false;
+  if (resultHasPublishedTime(result)) return false;
+
+  const input = classification.actionInput || {};
+  const trustEnabled =
+    input.trustAthleteEvidence === true ||
+    input.TRUST_ATHLETE_EVIDENCE === true ||
+    String(input.evidencePolicy || input.policyMode || "").toUpperCase() ===
+      "TRUST_ATHLETE_EVIDENCE";
+  const hasStructuredClaim = Boolean(
+    (input.competitionId || input.competition_id || input.competition) &&
+      (input.dorsal || input.bib || input.currentDorsal) &&
+      (input.athleteName || input.participantName)
+  );
+  const hasElapsedTime = Boolean(
+    normalizeDuration(
+      input.gpsElapsedTime ||
+        input.evidenceElapsedTime ||
+        input.requestedValue
+    )
+  );
+  const evidenceText = String(
+    [input.evidenceSummary, input.evidence, classification.summary]
+      .filter(Boolean)
+      .join(" ")
+  ).toLowerCase();
+  const hasObjectiveEvidence =
+    Boolean(input.hasStrongEvidence) ||
+    /(gps|adidas|garmin|strava|reloj|actividad|distancia|captura|imagen|foto)/.test(
+      evidenceText
+    );
+
+  return trustEnabled && hasStructuredClaim && hasElapsedTime && hasObjectiveEvidence;
+}
+
+async function inspectAthleteResultPreflight({
+  supportCase,
+  classification,
+  text,
+  userType,
+  execute = executeAction,
+}) {
+  const input = classification.actionInput || {};
+  if (classification.userType !== "ATHLETE" && userType !== "ATHLETE") {
+    return { classification, audit: null, resolution: null, promoted: false };
+  }
+  if (classification.action !== "EXOTIMER_CREATE_RESULT_CORRECTION_CASE") {
+    return { classification, audit: null, resolution: null, promoted: false };
+  }
 
   const competitionId = input.competitionId || input.competition_id || supportCase?.competitionId;
   const dorsals = uniqueStrings([
@@ -441,33 +851,194 @@ async function resolveResultFollowUpIfAlreadyUpdated({ conversation, supportCase
     ...(Array.isArray(input.detectedDorsals) ? input.detectedDorsals : []),
   ]);
   const requestedDorsals = uniqueStrings([input.newDorsal, input.dorsalNew, input.correctDorsal, input.requestedDorsal]);
-  if (!competitionId || (!dorsals.length && !requestedDorsals.length)) return null;
+  if (!competitionId || (!dorsals.length && !requestedDorsals.length)) {
+    return { classification, audit: null, resolution: null, promoted: false };
+  }
 
-  const list = await executeAction(userType, "EXOTIMER_GET_RESULTS", { competitionId }, { allowByPolicy: true });
+  const lookupDorsals = uniqueStrings([...requestedDorsals, ...dorsals]);
+  const lookupDorsal = lookupDorsals[0];
+  const list = await execute(
+    userType,
+    "EXOTIMER_GET_RESULTS",
+    {
+      competitionId,
+      dorsal: lookupDorsal,
+      detectedDorsals: lookupDorsals,
+    },
+    { allowByPolicy: true }
+  );
   const rows = Array.isArray(list) ? list : list?.results || list?.data || [];
-  const findByDorsals = (targets) =>
-    rows.find((row) => targets.some((dorsal) => String(row.dorsal) === dorsal || String(row.chip) === dorsal));
-
-  const currentResult = findByDorsals(dorsals);
-  const requestedResult = findByDorsals(requestedDorsals);
+  const currentResult = findResultByDorsals(rows, dorsals);
+  const requestedResult = findResultByDorsals(rows, requestedDorsals);
   const result = requestedResult || currentResult;
-  if (!result || !resultHasPublishedTime(result)) return null;
+  const baseAudit = {
+    type: "RESULT_PREFLIGHT",
+    request: {
+      method: "GET",
+      endpoint: "/timing/api/v1/results/admin/",
+      params: {
+        competition_id: Number(competitionId),
+        dorsals: lookupDorsals.map(String),
+      },
+    },
+    response: {
+      found: Boolean(result),
+      matches: rows.length,
+      result: result ? summarizeResultForClosure(result) : null,
+    },
+  };
+  if (!result) {
+    return {
+      classification,
+      audit: baseAudit,
+      resolution: null,
+      promoted: false,
+    };
+  }
 
   const resultId = result.id || result.result_id || result.resultId;
   let detail = result;
   if (resultId) {
     try {
-      detail = await executeAction(userType, "EXOTIMER_GET_RESULT_DETAIL", { resultId }, { allowByPolicy: true });
+      detail = await execute(
+        userType,
+        "EXOTIMER_GET_RESULT_DETAIL",
+        { resultId },
+        { allowByPolicy: true }
+      );
     } catch {
       detail = result;
     }
   }
 
   const summary = summarizeResultForClosure(detail);
+  const enrichedAudit = {
+    ...baseAudit,
+    response: {
+      ...baseAudit.response,
+      result: summary,
+    },
+  };
+  const enrichedInput = {
+    ...input,
+    resultId: summary.resultId || resultId,
+    currentValue: summary.officialTime || input.currentValue || null,
+    currentOfficialTime: summary.officialTime || null,
+    currentState: summary.state,
+  };
+
+  if (
+    shouldPromoteTrustedTimeCorrection(
+      { ...classification, actionInput: enrichedInput },
+      detail
+    )
+  ) {
+    return {
+      classification: {
+        ...classification,
+        action: "EXOTIMER_APPLY_RESULT_TIME_EVIDENCE_CORRECTION",
+        actionInput: enrichedInput,
+        needsHuman: false,
+        summary: `${classification.summary} El preflight encontro el resultado sin tiempo y habilito la correccion con evidencia acumulada.`,
+      },
+      audit: {
+        ...enrichedAudit,
+        response: {
+          ...enrichedAudit.response,
+          decision: "promote_time_evidence_correction",
+        },
+      },
+      resolution: null,
+      promoted: true,
+    };
+  }
+
+  if (
+    !resultHasPublishedTime(detail) ||
+    (!isResultFollowUpMessage(text, classification) &&
+      !isMissingResultClaim(text, classification))
+  ) {
+    return {
+      classification: {
+        ...classification,
+        actionInput: enrichedInput,
+      },
+      audit: enrichedAudit,
+      resolution: null,
+      promoted: false,
+    };
+  }
+
   const requestedDorsal = requestedDorsals[0] || null;
   const actualDorsal = summary.dorsal != null ? String(summary.dorsal) : null;
   const hasPendingDorsalChange = Boolean(requestedDorsal && actualDorsal && requestedDorsal !== actualDorsal);
   const resolutionType = hasPendingDorsalChange ? "RESULT_TIME_UPDATED_DORSAL_PENDING" : "RESULT_ALREADY_UPDATED";
+
+  return {
+    classification: {
+      ...classification,
+      action: null,
+      actionInput: enrichedInput,
+      needsHuman: hasPendingDorsalChange,
+      summary: hasPendingDorsalChange
+        ? `${classification.summary} El tiempo ya figura actualizado en ExoTimer, pero queda pendiente revisar el cambio de dorsal.`
+        : `${classification.summary} El resultado ya figura actualizado en ExoTimer.`,
+    },
+    audit: {
+      ...enrichedAudit,
+      response: {
+        ...enrichedAudit.response,
+        decision: resolutionType,
+      },
+    },
+    resolution: {
+      type: resolutionType,
+      action: "EXOTIMER_GET_RESULT_DETAIL",
+      checkedAt: new Date().toISOString(),
+      competitionId: String(competitionId),
+      requestedDorsal,
+      pendingDorsalChange: hasPendingDorsalChange
+        ? {
+            requestedDorsal,
+            actualDorsal,
+          }
+        : null,
+      result: summary,
+    },
+    promoted: false,
+  };
+}
+
+async function persistResultPreflight({
+  conversation,
+  supportCase,
+  triggerMessage,
+  userType,
+  preflight,
+}) {
+  if (preflight.audit) {
+    await prisma.supportAction.create({
+      data: {
+        conversationId: conversation.id,
+        supportCaseId: supportCase?.id || null,
+        messageId: triggerMessage.id,
+        userType,
+        name: "EXOTIMER_GET_RESULTS",
+        status: "EXECUTED",
+        input: {
+          source: "automatic_result_preflight",
+          ...preflight.audit.request,
+        },
+        output: preflight.audit,
+      },
+    });
+  }
+
+  const resolution = preflight.resolution;
+  if (!resolution) return;
+  const hasPendingDorsalChange = Boolean(resolution.pendingDorsalChange);
+  const requestedDorsal = resolution.requestedDorsal;
+  const actualDorsal = resolution.result?.dorsal;
 
   if (supportCase?.id) {
     await prisma.supportCase.update({
@@ -475,8 +1046,8 @@ async function resolveResultFollowUpIfAlreadyUpdated({ conversation, supportCase
       data: {
         status: hasPendingDorsalChange ? "WAITING_HUMAN" : "RESOLVED",
         summary: hasPendingDorsalChange
-          ? `${supportCase.summary || classification.summary || ""} Tiempo verificado en ExoTimer; queda pendiente validar cambio de dorsal ${actualDorsal} -> ${requestedDorsal}.`.trim()
-          : `${supportCase.summary || classification.summary || ""} Resultado verificado como actualizado en ExoTimer.`.trim(),
+          ? `${supportCase.summary || ""} Tiempo verificado en ExoTimer; queda pendiente validar cambio de dorsal ${actualDorsal} -> ${requestedDorsal}.`.trim()
+          : `${supportCase.summary || ""} Resultado verificado como actualizado en ExoTimer.`.trim(),
         lastMessageAt: new Date(),
       },
     });
@@ -488,21 +1059,6 @@ async function resolveResultFollowUpIfAlreadyUpdated({ conversation, supportCase
       status: hasPendingDorsalChange ? "WAITING_HUMAN" : "RESOLVED",
     },
   });
-
-  return {
-    type: resolutionType,
-    action: "EXOTIMER_GET_RESULT_DETAIL",
-    checkedAt: new Date().toISOString(),
-    competitionId: String(competitionId),
-    requestedDorsal,
-    pendingDorsalChange: hasPendingDorsalChange
-      ? {
-          requestedDorsal,
-          actualDorsal,
-        }
-      : null,
-    result: summary,
-  };
 }
 
 function buildImageAnalysisText(mediaAnalysis) {
@@ -644,6 +1200,10 @@ async function processConversationReply(conversationId) {
     ...classification,
     actionInput: normalizeDorsalReferences(classification.actionInput || {}),
   };
+  classification = await prepareCompetitionSetupClassification(
+    conversation,
+    classification
+  );
   if (classification.actionInput?.confirmed === true) {
     classification = {
       ...classification,
@@ -738,29 +1298,39 @@ async function processConversationReply(conversationId) {
   let contextActionError = contextResolution.contextActionError;
 
   try {
-    const followUpResolution = await resolveResultFollowUpIfAlreadyUpdated({
-      conversation,
+    const preflight = await inspectAthleteResultPreflight({
       supportCase,
       classification,
       text: processableText,
       userType,
     });
-    if (followUpResolution) {
+    classification = preflight.classification;
+    await persistResultPreflight({
+      conversation,
+      supportCase,
+      triggerMessage,
+      userType,
+      preflight,
+    });
+    if (preflight.audit || preflight.resolution) {
       contextActionResult = {
         ...(contextActionResult || {}),
-        followUpResolution,
-      };
-      classification = {
-        ...classification,
-        action: null,
-        needsHuman: Boolean(followUpResolution.pendingDorsalChange),
-        summary: followUpResolution.pendingDorsalChange
-          ? `${classification.summary} El tiempo ya figura actualizado en ExoTimer, pero queda pendiente revisar el cambio de dorsal.`
-          : `${classification.summary} El resultado ya figura actualizado en ExoTimer.`,
+        resultPreflight: preflight.audit,
+        ...(preflight.resolution
+          ? { followUpResolution: preflight.resolution }
+          : {}),
       };
       await prisma.conversation.update({
         where: { id: conversation.id },
-        data: { classification },
+        data: {
+          classification,
+          status:
+            preflight.resolution && !preflight.resolution.pendingDorsalChange
+              ? "RESOLVED"
+              : classification.needsHuman
+                ? "WAITING_HUMAN"
+                : "OPEN",
+        },
       });
     }
   } catch (error) {
@@ -769,6 +1339,29 @@ async function processConversationReply(conversationId) {
 
   if (classification.action) {
     const policy = await getPolicy(userType, classification.action);
+    const idempotencyKey = actionIdempotencyKey(
+      classification.action,
+      classification.actionInput || {}
+    );
+    const duplicateAction =
+      IDEMPOTENT_ACTIONS.has(classification.action) &&
+      classification.actionInput?.forceRetry !== true
+        ? await prisma.supportAction.findFirst({
+            where: {
+              conversationId: conversation.id,
+              name: classification.action,
+              status: { in: ["EXECUTED", "FAILED"] },
+              createdAt: {
+                gte: new Date(Date.now() - 10 * 60 * 1000),
+              },
+              input: {
+                path: ["_idempotencyKey"],
+                equals: idempotencyKey,
+              },
+            },
+            orderBy: { createdAt: "desc" },
+          })
+        : null;
     const action = await prisma.supportAction.create({
       data: {
         conversationId: conversation.id,
@@ -778,6 +1371,7 @@ async function processConversationReply(conversationId) {
         name: classification.action,
         input: {
           ...(classification.actionInput || {}),
+          _idempotencyKey: idempotencyKey,
           policy: {
             enabled: policy.enabled,
             requiresHuman: policy.requiresHuman,
@@ -800,7 +1394,36 @@ async function processConversationReply(conversationId) {
       mediaFilename: triggerMessage.mediaFilename || null,
     };
 
-    if (!trustedSystemUser && !policy.enabled) {
+    if (duplicateAction?.status === "EXECUTED") {
+      actionResult = {
+        ...(duplicateAction.output || {}),
+        idempotentReplay: true,
+        reusedFromActionId: duplicateAction.id,
+      };
+      await prisma.supportAction.update({
+        where: { id: action.id },
+        data: {
+          status: "SKIPPED",
+          output: actionResult,
+          error: `Accion equivalente reutilizada desde actionId ${duplicateAction.id}.`,
+        },
+      });
+    } else if (duplicateAction?.status === "FAILED") {
+      actionError =
+        duplicateAction.error ||
+        "La misma accion fallo recientemente y no se reintento automaticamente.";
+      await prisma.supportAction.update({
+        where: { id: action.id },
+        data: {
+          status: "SKIPPED",
+          error: `${actionError} Reintento omitido desde actionId ${duplicateAction.id}.`,
+        },
+      });
+      await prisma.conversation.update({
+        where: { id: conversation.id },
+        data: { status: "WAITING_HUMAN" },
+      });
+    } else if (!trustedSystemUser && !policy.enabled) {
       actionPending = {
         actionId: action.id,
         action: classification.action,
@@ -835,8 +1458,46 @@ async function processConversationReply(conversationId) {
 
         await prisma.supportAction.update({
           where: { id: action.id },
-          data: { status: "EXECUTED", output: actionResult },
+          data: {
+            status: "EXECUTED",
+            output: storedActionOutput(
+              classification.action,
+              actionInput,
+              actionResult
+            ),
+          },
         });
+        if (
+          classification.action ===
+            "EXOTIMER_APPLY_RESULT_TIME_EVIDENCE_CORRECTION" &&
+          actionResult?.verification?.verified
+        ) {
+          await Promise.all([
+            prisma.conversation.update({
+              where: { id: conversation.id },
+              data: { status: "RESOLVED" },
+            }),
+            supportCase?.id
+              ? prisma.supportCase.update({
+                  where: { id: supportCase.id },
+                  data: {
+                    status: "RESOLVED",
+                    summary: `${supportCase.summary || classification.summary || ""} Tiempo corregido y verificado automaticamente con evidencia acumulada.`.trim(),
+                    lastMessageAt: new Date(),
+                  },
+                })
+              : Promise.resolve(),
+          ]);
+        } else if (
+          classification.action ===
+            "EXOTIMER_APPLY_RESULT_TIME_EVIDENCE_CORRECTION" &&
+          actionResult?.created
+        ) {
+          await prisma.conversation.update({
+            where: { id: conversation.id },
+            data: { status: "WAITING_HUMAN" },
+          });
+        }
         if (
           classification.action === "EXOTIMER_PREVIEW_COMPETITION_SETUP" &&
           actionResult?.plan
@@ -1114,9 +1775,15 @@ async function processInboundExotimerMessage({
 }
 
 module.exports = {
+  actionIdempotencyKey,
   buildExotimerConversationPhone,
+  competitionPlanOverrides,
   findOrCreateExotimerConversation,
+  inspectAthleteResultPreflight,
+  mergeActionInput,
   processInboundExotimerMessage,
   processInboundMessage,
   processInboundText,
+  resultHasPublishedTime,
+  summarizeResultForClosure,
 };

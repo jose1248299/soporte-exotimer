@@ -64,6 +64,7 @@ test("las acciones conservan el contrato y usan los endpoints Race Line v1", asy
       return { ...competition, events: [event] };
     }
     if (path === "/registration/api/v1/tickets/") return [ticket];
+    if (path === "/registration/api/v1/inscriptions/") return [];
     if (path === "/timing/api/v1/results/admin/") return [result];
     if (path === "/timing/api/v1/results/detail/1000/") {
       return { item: result, result, participant: { name: "Ana", lastname: "Perez" } };
@@ -111,6 +112,37 @@ test("las acciones conservan el contrato y usan los endpoints Race Line v1", asy
         call.path === "/timing/api/v1/results/admin/" &&
         call.params?.competition_id === 530
     )
+  );
+
+  const inscription = await executeAction(
+    "SYSTEM_USER",
+    "EXOTIMER_GET_INSCRIPTION",
+    {
+      competitionId: 782,
+      dorsal: 1086,
+    }
+  );
+  assert.equal(inscription.found, false);
+  assert.equal(inscription.resultFound, true);
+  assert.equal(inscription.timingResult.id, 1000);
+  assert.ok(
+    calls.some(
+      (call) => call.path === "/registration/api/v1/inscriptions/"
+    )
+  );
+  assert.ok(
+    calls.some(
+      (call) =>
+        call.path === "/registration/api/v1/inscriptions/" &&
+        call.params?.competition_id === 782
+    )
+  );
+  assert.equal(
+    calls.some(
+      (call) =>
+        call.path === "/registration/api/v1/inscriptions/detail-verify/"
+    ),
+    false
   );
 
   await executeAction("SYSTEM_USER", "EXOTIMER_UPDATE_RESULT_DORSAL", {
@@ -189,6 +221,71 @@ test("las acciones conservan el contrato y usan los endpoints Race Line v1", asy
   assert.equal(
     calls.some((call) => /\/(?:v2|v3)\//.test(call.path) || call.path === "/api/token/"),
     false
+  );
+});
+
+test("las busquedas de inscripcion no mezclan identidades incompatibles", async () => {
+  const calls = [];
+  const raceline = require("./racelineClient");
+  raceline.apiRequest = async (request) => {
+    calls.push(request);
+    if (request.path === "/registration/api/v1/inscriptions/") {
+      return [
+        {
+          id: 30683,
+          competition_id: 543,
+          document: {
+            nombre: "Karen",
+            apellidos: "Tamayo",
+            dni: "74881111",
+            email: "karentamayo981@gmail.com",
+            phone: "904861276",
+          },
+        },
+        {
+          id: 30705,
+          competition_id: 543,
+          document: {
+            nombre: "Anny",
+            apellidos: "Tamayo Rojas",
+            dni: "76322316",
+            email: "tamayorojasanny@gmail.com",
+            phone: "999111222",
+          },
+        },
+      ];
+    }
+    throw new Error(`Request inesperado: ${request.path}`);
+  };
+
+  delete require.cache[require.resolve("./exotimerClient")];
+  const { executeAction } = require("./exotimerClient");
+  const conflicting = await executeAction(
+    "ATHLETE",
+    "EXOTIMER_GET_INSCRIPTION_BY_REFERENCE_OR_DOCUMENT",
+    {
+      competitionId: 543,
+      document: "7632316",
+      email: "karentamayo981@gmail.com",
+    }
+  );
+  assert.equal(conflicting.found, false);
+  assert.ok(conflicting.candidates[0].conflicts.includes("document"));
+
+  const exact = await executeAction(
+    "ATHLETE",
+    "EXOTIMER_GET_INSCRIPTION_BY_REFERENCE_OR_DOCUMENT",
+    {
+      competitionId: 543,
+      document: "76322316",
+    }
+  );
+  assert.equal(exact.found, true);
+  assert.equal(exact.bestMatch.id, 30705);
+  assert.ok(
+    calls.every(
+      (call) => call.params?.competition_id === 543
+    )
   );
 });
 
@@ -405,6 +502,26 @@ test("preview no escribe y apply crea categorias, tickets, pagos y timing verifi
     false
   );
 
+  const recoveredPreview = await executeAction(
+    "TIMER",
+    "EXOTIMER_PREVIEW_COMPETITION_SETUP",
+    {
+      plan: {
+        ...preview.plan,
+        version: 999,
+        competition: {
+          ...preview.plan.competition,
+          city: "Lima",
+          sport: "Running",
+          organizer: "Triatlon GT",
+        },
+      },
+    }
+  );
+  assert.equal(recoveredPreview.readyToApply, true);
+  assert.equal(recoveredPreview.plan.events.length, 2);
+  assert.equal(recoveredPreview.plan.tickets.length, 2);
+
   const ambiguousPreview = await executeAction(
     "TIMER",
     "EXOTIMER_PREVIEW_COMPETITION_SETUP",
@@ -550,4 +667,115 @@ test("la confirmacion del Timer reutiliza exactamente el plan validado", async (
   assert.equal(classification.actionInput.confirmed, true);
   assert.strictEqual(classification.actionInput.plan, plan);
   assert.equal(classification.needsHuman, false);
+});
+
+test("la correccion GPS usa la salida oficial y verifica la respuesta v1", async () => {
+  const calls = [];
+  const competition = {
+    id: 569,
+    name: "Media Maraton de Chiclayo 2026",
+    slug: "media-maraton-de-chiclayo-2026",
+    start_date: "2026-07-29T12:05:52Z",
+  };
+  const event = {
+    id: 1699,
+    competition_id: 569,
+    name: "21K",
+    start_at: "2026-07-29T12:05:52Z",
+    extra_data: {},
+    categories: [],
+  };
+  let result = {
+    id: 167001,
+    competition_id: 569,
+    event_id: 1699,
+    category_id: 2747,
+    participant_display_name: "Alex Reyes Chinchay",
+    participant_snapshot_payload: {
+      first_name: "Alex",
+      last_name: "Reyes Chinchay",
+    },
+    event_name: "21K",
+    category_name: "LIBRE",
+    gender: "Masculino",
+    dorsal: 7,
+    chip: "7",
+    salida: "21K",
+    state: "sin_salida",
+    official_time_ms: null,
+    finish_at: null,
+    document: { time_TOTAL: "00:00:00" },
+    raw_assignments: [],
+  };
+
+  const raceline = require("./racelineClient");
+  raceline.apiRequest = async (request) => {
+    calls.push(request);
+    const { method = "GET", path } = request;
+    if (path === "/catalog/api/v1/competitions/") return [competition];
+    if (path === "/catalog/api/v1/events/1699") return event;
+    if (path === "/timing/api/v1/raws/config/salidas/569/") return {};
+    if (path === "/timing/api/v1/results/admin/") return [result];
+    if (path === "/timing/api/v1/results/detail/167001/") {
+      return { item: result };
+    }
+    if (method === "POST" && path === "/timing/api/v1/raws/") {
+      return { id: 29599, ...request.data };
+    }
+    if (
+      method === "POST" &&
+      path === "/timing/api/v1/results/edit-times/"
+    ) {
+      result = {
+        ...result,
+        state: "finalizado",
+        official_time_ms: 7794000,
+        finish_at: "2026-07-29T14:15:46Z",
+        document: {
+          time_TOTAL: "02:09:54",
+          loc_Meta: 29599,
+        },
+      };
+      return { id: 167001, updated: true };
+    }
+    throw new Error(`Request inesperado: ${method} ${path}`);
+  };
+
+  delete require.cache[require.resolve("./exotimerClient")];
+  const { executeAction } = require("./exotimerClient");
+  const output = await executeAction(
+    "ATHLETE",
+    "EXOTIMER_APPLY_RESULT_TIME_EVIDENCE_CORRECTION",
+    {
+      competitionId: 569,
+      dorsal: 7,
+      athleteName: "Alex Reyes",
+      requestedValue: "02:09:54",
+      gpsElapsedTime: "02:09:54",
+      evidenceFinishTime: "02:09:54",
+      activityStartDateTime: "07:05",
+      evidencePolicy: "TRUST_ATHLETE_EVIDENCE",
+      trustAthleteEvidence: true,
+      evidenceSummary:
+        "Capturas de Adidas y GPS con distancia 21.42 km, duracion y recorrido.",
+    }
+  );
+
+  const rawCreate = calls.find(
+    (call) => call.method === "POST" && call.path === "/timing/api/v1/raws/"
+  );
+  const editTime = calls.find(
+    (call) =>
+      call.method === "POST" &&
+      call.path === "/timing/api/v1/results/edit-times/"
+  );
+  assert.equal(rawCreate.data.hour, "29/07/2026 09:15:46");
+  assert.equal(editTime.data.timeCurrent, "02:09:54");
+  assert.equal(
+    editTime.data.timeDateCurrent,
+    "2026-07-29T09:15:46-05:00"
+  );
+  assert.equal(output.verification.verified, true);
+  assert.equal(output.verification.officialTime, "02:09:54");
+  assert.equal(output.changed.after.state, "finalizado");
 });
