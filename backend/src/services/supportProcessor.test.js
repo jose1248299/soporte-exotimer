@@ -3,11 +3,52 @@ const assert = require("node:assert/strict");
 const {
   actionIdempotencyKey,
   competitionPlanOverrides,
+  enforceVerifiedActionReply,
   inspectAthleteResultPreflight,
   mergeActionInput,
   resultHasPublishedTime,
   summarizeResultForClosure,
 } = require("./supportProcessor");
+
+test("una correccion de tiempo no verificada nunca se comunica como exitosa", () => {
+  const reply = enforceVerifiedActionReply({
+    reply: "Tu tiempo ya fue corregido. Refresca la pagina para verlo.",
+    classification: {
+      action: "EXOTIMER_APPLY_RESULT_TIME_EVIDENCE_CORRECTION",
+      actionInput: { requestedValue: "01:06:01" },
+    },
+    actionResult: {
+      created: true,
+      changed: { requestedOfficialTime: "01:06:01" },
+      verification: {
+        verified: false,
+        officialTime: "01:11:02",
+      },
+    },
+  });
+
+  assert.match(reply, /no coincide todavia/i);
+  assert.match(reply, /01:06:01/);
+  assert.match(reply, /01:11:02/);
+  assert.match(reply, /revision humana/i);
+  assert.doesNotMatch(reply, /ya fue corregido/i);
+});
+
+test("una correccion de tiempo verificada conserva la respuesta generada", () => {
+  const original = "Tu tiempo fue corregido a 01:06:01.";
+  const reply = enforceVerifiedActionReply({
+    reply: original,
+    classification: {
+      action: "EXOTIMER_APPLY_RESULT_TIME_EVIDENCE_CORRECTION",
+    },
+    actionResult: {
+      created: true,
+      verification: { verified: true, officialTime: "01:06:01" },
+    },
+  });
+
+  assert.equal(reply, original);
+});
 
 test("un nuevo documento limpia identificadores heredados de otra persona", () => {
   const merged = mergeActionInput(

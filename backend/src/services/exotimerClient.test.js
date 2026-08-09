@@ -779,3 +779,157 @@ test("la correccion GPS usa la salida oficial y verifica la respuesta v1", async
   assert.equal(output.verification.officialTime, "02:09:54");
   assert.equal(output.changed.after.state, "finalizado");
 });
+
+test("tiempo_chip crea y asigna salida individual antes de corregir la meta", async () => {
+  const calls = [];
+  const competition = {
+    id: 585,
+    name: "Carrera tiempo chip",
+    slug: "carrera-tiempo-chip",
+    start_date: "2026-08-09T13:27:58Z",
+  };
+  const event = {
+    id: 1718,
+    competition_id: 585,
+    name: "10K",
+    start_at: "2026-08-09T13:27:58Z",
+    extra_data: {
+      admin_form: {
+        configs: {
+          type_salidas: "tiempo_chip",
+          salidas: [
+            {
+              data: {
+                nombre: "10K",
+                fecha: "09/08/2026, 08:27:58",
+              },
+            },
+          ],
+        },
+      },
+    },
+    categories: [],
+  };
+  let result = {
+    id: 172579,
+    competition_id: 585,
+    event_id: 1718,
+    participant_display_name: "Claudia Garcia Silva",
+    participant_snapshot_payload: {
+      first_name: "Claudia",
+      last_name: "Garcia Silva",
+    },
+    event_name: "10K",
+    category_name: "GENERAL",
+    gender: "Femenino",
+    dorsal: 1362,
+    chip: "1362",
+    salida: "10K",
+    state: "en_carrera",
+    official_time_ms: null,
+    finish_at: null,
+    document: { time_TOTAL: "00:00:00" },
+    raw_assignments: [],
+  };
+  let nextRawId = 30001;
+
+  const raceline = require("./racelineClient");
+  raceline.apiRequest = async (request) => {
+    calls.push(request);
+    const { method = "GET", path } = request;
+    if (path === "/catalog/api/v1/competitions/") return [competition];
+    if (path === "/catalog/api/v1/events/1718") return event;
+    if (path === "/timing/api/v1/raws/config/salidas/585/") return {};
+    if (path === "/timing/api/v1/results/admin/") return [result];
+    if (path === "/timing/api/v1/results/detail/172579/") {
+      return { item: result };
+    }
+    if (method === "POST" && path === "/timing/api/v1/raws/") {
+      return { id: nextRawId++, ...request.data };
+    }
+    if (
+      method === "POST" &&
+      path === "/timing/api/v1/results/edit-times/"
+    ) {
+      const rawId = request.data.selectRaw;
+      const location = request.data.name_colum === "loc_Salida" ? "SALIDA" : "META";
+      const assignment = {
+        key: request.data.name_colum,
+        raw_id: rawId,
+        raw: {
+          id: rawId,
+          dorsal: "1362",
+          chip: "1362",
+          read_at: request.data.timeDateCurrent,
+          location,
+        },
+      };
+      result = {
+        ...result,
+        raw_assignments: [
+          ...result.raw_assignments.filter(
+            (row) => row.key !== request.data.name_colum
+          ),
+          assignment,
+        ],
+      };
+      if (request.data.name_colum === "loc_Meta") {
+        result = {
+          ...result,
+          state: "finalizado",
+          official_time_ms: 3961000,
+          finish_at: "2026-08-09T09:39:00-05:00",
+          document: {
+            ...result.document,
+            time_TOTAL: "01:06:01",
+            loc_Meta: rawId,
+          },
+        };
+      }
+      return { id: 172579, updated: true };
+    }
+    throw new Error(`Request inesperado: ${method} ${path}`);
+  };
+
+  delete require.cache[require.resolve("./exotimerClient")];
+  const { executeAction } = require("./exotimerClient");
+  const output = await executeAction(
+    "ATHLETE",
+    "EXOTIMER_APPLY_RESULT_TIME_EVIDENCE_CORRECTION",
+    {
+      competitionId: 585,
+      dorsal: 1362,
+      athleteName: "Claudia Garcia Silva",
+      requestedValue: "01:06:01",
+      evidenceElapsedTime: "01:06:01",
+      evidenceFinishDateTime: "2026-08-09T09:39:00-05:00",
+      evidencePolicy: "TRUST_ATHLETE_EVIDENCE",
+      trustAthleteEvidence: true,
+      hasStrongEvidence: true,
+      evidenceSummary:
+        "Reloj, dorsal, medalla e identidad compatibles con el evento.",
+    }
+  );
+
+  const rawCreates = calls.filter(
+    (call) => call.method === "POST" && call.path === "/timing/api/v1/raws/"
+  );
+  const timeEdits = calls.filter(
+    (call) =>
+      call.method === "POST" &&
+      call.path === "/timing/api/v1/results/edit-times/"
+  );
+  assert.equal(rawCreates.length, 2);
+  assert.equal(rawCreates[0].data.location, "SALIDA");
+  assert.equal(rawCreates[0].data.hour, "09/08/2026 08:32:59");
+  assert.equal(rawCreates[1].data.location, "META");
+  assert.equal(rawCreates[1].data.hour, "09/08/2026 09:39:00");
+  assert.equal(timeEdits[0].data.name_colum, "loc_Salida");
+  assert.equal(timeEdits[0].data.timeCurrent, "00:05:01");
+  assert.equal(timeEdits[1].data.name_colum, "loc_Meta");
+  assert.equal(timeEdits[1].data.timeCurrent, "01:06:01");
+  assert.equal(output.timingMode, "tiempo_chip");
+  assert.equal(output.start.created, true);
+  assert.equal(output.verification.verified, true);
+  assert.equal(output.verification.officialTime, "01:06:01");
+});

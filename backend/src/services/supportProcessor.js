@@ -227,6 +227,40 @@ function storedActionOutput(actionName, input = {}, result) {
   return result;
 }
 
+function isUnverifiedTimeCorrection(classification = {}, actionResult = null) {
+  return Boolean(
+    classification.action ===
+      "EXOTIMER_APPLY_RESULT_TIME_EVIDENCE_CORRECTION" &&
+      actionResult?.created &&
+      actionResult?.verification?.verified !== true
+  );
+}
+
+function enforceVerifiedActionReply({ reply, classification, actionResult }) {
+  if (!isUnverifiedTimeCorrection(classification, actionResult)) return reply;
+
+  const requestedTime =
+    actionResult?.changed?.requestedOfficialTime ||
+    actionResult?.changed?.computedTimeCurrent ||
+    classification?.actionInput?.requestedValue ||
+    null;
+  const observedTime = actionResult?.verification?.officialTime || null;
+  const comparison = [
+    requestedTime ? `tiempo solicitado ${requestedTime}` : null,
+    observedTime ? `tiempo observado ${observedTime}` : null,
+  ]
+    .filter(Boolean)
+    .join(" y ");
+
+  return [
+    "La correccion se proceso, pero la verificacion final del resultado no coincide todavia.",
+    comparison ? `La lectura posterior muestra ${comparison}.` : null,
+    "El caso quedo pendiente de revision humana y no necesitas enviar mas evidencia por ahora.",
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
 function planComparableValue(plan) {
   if (!plan || typeof plan !== "object") return null;
   return stableActionValue({
@@ -1456,15 +1490,23 @@ async function processConversationReply(conversationId) {
           allowByPolicy: true,
         });
 
+        const verificationFailed = isUnverifiedTimeCorrection(
+          classification,
+          actionResult
+        );
+
         await prisma.supportAction.update({
           where: { id: action.id },
           data: {
-            status: "EXECUTED",
+            status: verificationFailed ? "FAILED" : "EXECUTED",
             output: storedActionOutput(
               classification.action,
               actionInput,
               actionResult
             ),
+            error: verificationFailed
+              ? "La escritura se ejecuto, pero la verificacion posterior no coincide con el tiempo solicitado."
+              : null,
           },
         });
         if (
@@ -1528,7 +1570,7 @@ async function processConversationReply(conversationId) {
     }
   }
 
-  const reply = await composeReply({
+  let reply = await composeReply({
     userType,
     text: processableText,
     classification,
@@ -1539,6 +1581,11 @@ async function processConversationReply(conversationId) {
     contextActionError,
     history,
     channel: conversation.channel,
+  });
+  reply = enforceVerifiedActionReply({
+    reply,
+    classification,
+    actionResult,
   });
 
   let sent = null;
@@ -1778,6 +1825,7 @@ module.exports = {
   actionIdempotencyKey,
   buildExotimerConversationPhone,
   competitionPlanOverrides,
+  enforceVerifiedActionReply,
   findOrCreateExotimerConversation,
   inspectAthleteResultPreflight,
   mergeActionInput,

@@ -4314,19 +4314,69 @@ function findRawByIdCandidate(value) {
   return null;
 }
 
-async function findCreatedRawId({ resultId, rawHour, dorsal, competitionId }) {
+async function findCreatedRawId({ resultId, rawHour, dorsal, competitionId, location = "META" }) {
   const detail = firstDetail(await getResultDetail({ resultId }));
   const rows = [...asArray(detail?.raws), ...asArray(detail?.raws_asigments)];
   const match = rows.find((raw) => {
     const rawDorsal = normalizeDorsal(raw?.dorsal || raw?.bib || raw?.chip);
     const sameDorsal = rawDorsal && String(rawDorsal) === String(dorsal);
-    const sameLocation = normalizeText(raw?.location) === "meta";
-    const sameCompetition = !raw?.competition || String(raw.competition) === String(competitionId);
+    const sameLocation = normalizeText(raw?.location) === normalizeText(location);
+    const rawCompetition = raw?.competition ?? raw?.competition_id;
+    const sameCompetition = !rawCompetition || String(rawCompetition) === String(competitionId);
     const parsedRaw = parseLocalDateTime(raw?.hour || raw?.zulu);
     const sameHour = parsedRaw && formatRawDateTime(parsedRaw) === rawHour;
     return sameDorsal && sameLocation && sameCompetition && sameHour;
   });
   return match?.id || match?.raw_id || match?.rawId || null;
+}
+
+function resultTimingMode(detail = {}) {
+  const sources = [
+    detail?.event?.configs,
+    detail?.event?.extra_data?.admin_form?.configs,
+    detail?.event?.extra_data?.configs,
+  ];
+  let mode = null;
+  for (const source of sources) {
+    const pending = asArray(source);
+    while (pending.length && !mode) {
+      const config = pending.shift();
+      if (!config || typeof config !== "object") continue;
+      mode = config.type_salidas || null;
+      if (!mode) {
+        pending.push(
+          ...Object.values(config).filter(
+            (value) => value && typeof value === "object"
+          )
+        );
+      }
+    }
+    if (mode) break;
+  }
+  return normalizeText(mode).replace(/[\s-]+/g, "_");
+}
+
+function assignedPointRaw(detail = {}, pointName) {
+  const target = normalizeText(pointName);
+  return [
+    ...asArray(detail?.raws_asigments),
+    ...asArray(detail?.raws_assignments),
+  ].find((raw) => {
+    const point = normalizeText(
+      raw?.point_control || raw?.key || raw?.name || raw?.type
+    ).replace(/^loc_/, "");
+    const location = normalizeText(raw?.location);
+    const rawId = raw?.id || raw?.raw_id || raw?.rawId;
+    return Boolean(rawId && (point === target || location === target));
+  });
+}
+
+function subtractDuration(parts, seconds) {
+  if (!parts || seconds == null) return null;
+  return utcMsToDateParts(
+    datePartsToUtcMs(parts) - seconds * 1000,
+    parts.offset || "-05:00"
+  );
 }
 
 function requestedValue(input = {}) {
@@ -4882,11 +4932,23 @@ async function applyResultTimeEvidenceCorrection(input = {}) {
     throw new Error("La evidencia no esta marcada como contundente para corregir el tiempo automaticamente.");
   }
 
-  const timeCurrent = buildTimeCorrectionCurrent({ input: normalizedInput, detail, finishParts });
+  const timingMode = resultTimingMode(detail);
+  const isChipTiming = timingMode === "tiempo_chip";
+  const requestedSeconds = pickRequestedSeconds(normalizedInput);
+  if (isChipTiming && requestedSeconds == null) {
+    throw new Error(
+      "El evento usa tiempo_chip y falta la duracion solicitada para construir una salida individual coherente."
+    );
+  }
+  const existingStartRaw = isChipTiming ? assignedPointRaw(detail, "salida") : null;
+  const timeCurrent =
+    isChipTiming && requestedSeconds != null
+      ? formatDuration(requestedSeconds)
+      : buildTimeCorrectionCurrent({ input: normalizedInput, detail, finishParts });
   if (!timeCurrent) throw new Error("No se pudo calcular el tiempo para asignar la hora meta.");
 
   const officialSeconds = pickOfficialSeconds(normalizedInput, detail);
-  const proposedSeconds = pickRequestedSeconds(normalizedInput) ?? parseDurationSeconds(timeCurrent);
+  const proposedSeconds = requestedSeconds ?? parseDurationSeconds(timeCurrent);
   const minDifferenceSeconds = Number(normalizedInput.minDifferenceSeconds || 120);
   if (proposedSeconds == null) {
     throw new Error("Falta el tiempo propuesto para validar la correccion.");
@@ -4900,6 +4962,86 @@ async function applyResultTimeEvidenceCorrection(input = {}) {
     if (differenceSeconds < minDifferenceSeconds) {
       throw new Error(`La diferencia con el tiempo oficial es menor a ${minDifferenceSeconds} segundos.`);
     }
+  }
+
+  let startCorrection = null;
+  if (isChipTiming && existingStartRaw) {
+    startCorrection = {
+      created: false,
+      preserved: true,
+      rawId: existingStartRaw.id || existingStartRaw.raw_id || existingStartRaw.rawId,
+      hour: existingStartRaw.hour || existingStartRaw.zulu || null,
+      reason: "existing_individual_start",
+    };
+  } else if (isChipTiming) {
+    const startParts = subtractDuration(finishParts, proposedSeconds);
+    if (!startParts) {
+      throw new Error("No se pudo derivar la salida individual para el evento tiempo_chip.");
+    }
+
+    const startHour = formatRawDateTime(startParts);
+    const startRawPayload = {
+      competitionId,
+      dorsal,
+      chip: normalizeDorsal(normalizedInput.chip || detail?.chip || dorsal),
+      hour: startHour,
+      zulu: startHour,
+      location: "SALIDA",
+      team_computer:
+        normalizedInput.startTeamComputer || `reader_SALIDA_${competitionId}`,
+      state: false,
+    };
+    const startRawResponse = await createManualRaw(startRawPayload);
+    let startRawId = findRawByIdCandidate(startRawResponse);
+    if (!startRawId) {
+      startRawId = await findCreatedRawId({
+        resultId,
+        rawHour: startHour,
+        dorsal,
+        competitionId,
+        location: "SALIDA",
+      });
+    }
+    if (!startRawId) {
+      throw new Error(
+        "Se creo el raw de salida, pero no se pudo identificar su id para asignarlo al resultado."
+      );
+    }
+
+    const eventStart = pickEventStartDateTime(detail, normalizedInput);
+    const startElapsedSeconds = eventStart
+      ? Math.max(
+          0,
+          Math.round(
+            (datePartsToUtcMs(startParts) - datePartsToUtcMs(eventStart)) / 1000
+          )
+        )
+      : 0;
+    const startEditPayload = {
+      timeDateCurrent: formatIsoLocal(startParts),
+      timeCurrent: formatDuration(startElapsedSeconds),
+      selectRaw: startRawId,
+      result_id: resultId,
+      name_colum: "loc_Salida",
+    };
+    const startEditResponse = await editResultTime(startEditPayload);
+    startCorrection = {
+      created: true,
+      preserved: false,
+      derivedFrom: "finish_minus_requested_duration",
+      rawId: startRawId,
+      hour: startHour,
+      raw: {
+        endpoint: "/timing/api/v1/raws/",
+        payload: startRawPayload,
+        response: startRawResponse,
+      },
+      edit: {
+        endpoint: "/timing/api/v1/results/edit-times/",
+        payload: startEditPayload,
+        response: startEditResponse,
+      },
+    };
   }
 
   const rawHour = formatRawDateTime(finishParts);
@@ -4916,7 +5058,13 @@ async function applyResultTimeEvidenceCorrection(input = {}) {
   const rawResponse = await createManualRaw(rawPayload);
   let rawId = findRawByIdCandidate(rawResponse);
   if (!rawId) {
-    rawId = await findCreatedRawId({ resultId, rawHour, dorsal, competitionId });
+    rawId = await findCreatedRawId({
+      resultId,
+      rawHour,
+      dorsal,
+      competitionId,
+      location: "META",
+    });
   }
   if (!rawId) {
     throw new Error("Se creo el raw, pero no se pudo identificar su id para asignarlo al resultado.");
@@ -4959,6 +5107,7 @@ async function applyResultTimeEvidenceCorrection(input = {}) {
   return {
     created: true,
     type: "RESULT_TIME_EVIDENCE_CORRECTION",
+    timingMode: timingMode || null,
     evidencePolicy: trustAssessment.enabled ? "TRUST_ATHLETE_EVIDENCE" : "STRICT_EVIDENCE",
     evidenceTrustAssessment: trustAssessment,
     changed: {
@@ -4969,11 +5118,14 @@ async function applyResultTimeEvidenceCorrection(input = {}) {
       evidenceFinishDateTime: formatIsoLocal(finishParts),
       evidenceRawHour: rawHour,
       createdRawId: rawId,
+      startRawId: startCorrection?.rawId || null,
       assignedColumn: editPayload.name_colum,
       computedTimeCurrent: timeCurrent,
+      requestedOfficialTime: formatDuration(proposedSeconds),
       after: verification,
     },
     verification,
+    start: startCorrection,
     raw: {
       endpoint: "/timing/api/v1/raws/",
       payload: rawPayload,
