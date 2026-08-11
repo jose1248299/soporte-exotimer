@@ -1,6 +1,7 @@
 const express = require("express");
 const prisma = require("../lib/prisma");
 const { sendTextMessage } = require("../services/waba");
+const { whatsappConversationRecipient } = require("../utils/whatsapp");
 const {
   findOrCreateExotimerConversation,
   processInboundExotimerMessage,
@@ -17,6 +18,7 @@ const messageSelect = {
   direction: true,
   contentType: true,
   phone: true,
+  whatsappUserId: true,
   content: true,
   mediaId: true,
   mediaMimeType: true,
@@ -195,7 +197,10 @@ router.post("/support-cases/:caseId/messages", async (req, res) => {
 
   let sent = null;
   try {
-    sent = await sendTextMessage(supportCase.conversation.phone, content);
+    sent = await sendTextMessage(
+      whatsappConversationRecipient(supportCase.conversation),
+      content
+    );
   } catch (error) {
     console.error("No se pudo enviar mensaje WhatsApp desde Exotimer:", error.response?.data || error.message);
     return res.status(502).json({ error: "No se pudo enviar por WhatsApp" });
@@ -209,6 +214,7 @@ router.post("/support-cases/:caseId/messages", async (req, res) => {
       competitionId: supportCase.competitionId,
       direction: "OUTBOUND",
       phone: supportCase.conversation.phone,
+      whatsappUserId: supportCase.conversation.whatsappUserId || null,
       content,
       aiMetadata: {
         manual: true,

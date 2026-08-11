@@ -9,6 +9,65 @@ const {
   resultHasPublishedTime,
   summarizeResultForClosure,
 } = require("./supportProcessor");
+const {
+  normalizeWhatsappRecipient,
+  resolveWhatsappIdentity,
+  whatsappConversationRecipient,
+} = require("../utils/whatsapp");
+
+test("resuelve telefono y BSUID cuando Meta entrega ambos identificadores", () => {
+  const identity = resolveWhatsappIdentity({
+    contacts: [
+      {
+        wa_id: "51999999999",
+        user_id: "PE.123456789",
+      },
+    ],
+    messages: [
+      {
+        from: "51999999999",
+        from_user_id: "PE.123456789",
+      },
+    ],
+  });
+
+  assert.deepEqual(identity, {
+    phone: "51999999999",
+    whatsappUserId: "PE.123456789",
+    recipient: "51999999999",
+  });
+});
+
+test("usa from_user_id sin deformarlo cuando Meta oculta el telefono", () => {
+  const identity = resolveWhatsappIdentity({
+    contacts: [{ user_id: "PE.1622159666096358" }],
+    messages: [{ from_user_id: "PE.1622159666096358" }],
+  });
+
+  assert.deepEqual(identity, {
+    phone: null,
+    whatsappUserId: "PE.1622159666096358",
+    recipient: "PE.1622159666096358",
+  });
+  assert.equal(
+    normalizeWhatsappRecipient("PE.1622159666096358"),
+    "PE.1622159666096358"
+  );
+});
+
+test("los envios prefieren el BSUID estable y conservan telefonos tradicionales", () => {
+  assert.equal(
+    whatsappConversationRecipient({
+      phone: "51999999999",
+      whatsappUserId: "PE.123456789",
+    }),
+    "PE.123456789"
+  );
+  assert.equal(
+    whatsappConversationRecipient({ phone: "+51 999 999 999" }),
+    "51999999999"
+  );
+});
 
 test("una correccion de tiempo no verificada nunca se comunica como exitosa", () => {
   const reply = enforceVerifiedActionReply({

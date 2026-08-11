@@ -68,6 +68,7 @@ model Conversation {
   id             Int                @id @default(autoincrement())
   channel        MessageChannel     @default(WHATSAPP)
   phone          String
+  whatsappUserId String?
   displayName    String?
   userType       UserType           @default(UNKNOWN)
   status         ConversationStatus @default(OPEN)
@@ -82,6 +83,7 @@ model Conversation {
   cases    SupportCase[]
 
   @@unique([channel, phone])
+  @@unique([channel, whatsappUserId])
   @@index([phone])
   @@index([userType])
   @@index([status])
@@ -125,6 +127,7 @@ model Message {
   direction      MessageDirection
   contentType    MessageContentType @default(TEXT)
   phone          String
+  whatsappUserId String?
   content        String
   mediaId        String?
   mediaMimeType  String?
@@ -144,6 +147,7 @@ model Message {
   @@index([supportCaseId, timestamp])
   @@index([competitionId, timestamp])
   @@index([phone])
+  @@index([whatsappUserId])
 }
 
 model SupportAction {

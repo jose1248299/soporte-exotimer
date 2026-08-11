@@ -1,6 +1,7 @@
 const express = require("express");
 const config = require("../config");
 const { processInboundMessage } = require("../services/supportProcessor");
+const { resolveWhatsappIdentity } = require("../utils/whatsapp");
 
 const router = express.Router();
 
@@ -33,6 +34,11 @@ router.post("/", async (req, res) => {
     }
 
     const contact = value.contacts?.[0];
+    const identity = resolveWhatsappIdentity(value);
+    if (!identity.recipient) {
+      console.warn("Webhook de WhatsApp recibido sin telefono ni from_user_id.");
+      return res.sendStatus(200);
+    }
     const timestamp = message.timestamp
       ? new Date(Number(message.timestamp) * 1000)
       : new Date();
@@ -41,7 +47,8 @@ router.post("/", async (req, res) => {
 
     await processInboundMessage({
       waId: message.id || null,
-      from: message.from,
+      from: identity.recipient,
+      whatsappUserId: identity.whatsappUserId,
       type: message.type,
       text:
         message.type === "image"
@@ -59,7 +66,8 @@ router.post("/", async (req, res) => {
         : null,
       timestamp,
       rawPayload: req.body,
-      displayName: contact?.profile?.name || null,
+      displayName:
+        contact?.profile?.name || contact?.profile?.username || null,
     });
   } catch (error) {
     console.error("Error procesando webhook:", error);

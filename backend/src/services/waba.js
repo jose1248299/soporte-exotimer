@@ -1,6 +1,6 @@
 const axios = require("axios");
 const config = require("../config");
-const { normalizePhone } = require("../utils/phone");
+const { normalizeWhatsappRecipient } = require("../utils/whatsapp");
 
 const apiUrl = `https://graph.facebook.com/${config.meta.graphVersion}`;
 
@@ -30,11 +30,19 @@ async function postMessage(payload) {
   return data;
 }
 
+function recipientAddress(to) {
+  const recipient = normalizeWhatsappRecipient(to);
+  if (!recipient) {
+    throw new Error("Destinatario de WhatsApp invalido.");
+  }
+  return recipient;
+}
+
 async function sendTextMessage(to, body) {
   return postMessage({
     messaging_product: "whatsapp",
     recipient_type: "individual",
-    to: normalizePhone(to),
+    to: recipientAddress(to),
     type: "text",
     text: {
       preview_url: false,
@@ -47,7 +55,7 @@ async function sendImageMessage(to, link, caption) {
   return postMessage({
     messaging_product: "whatsapp",
     recipient_type: "individual",
-    to: normalizePhone(to),
+    to: recipientAddress(to),
     type: "image",
     image: {
       link,
@@ -60,7 +68,7 @@ async function sendDocumentMessage(to, link, caption, filename = "confirmacion-i
   return postMessage({
     messaging_product: "whatsapp",
     recipient_type: "individual",
-    to: normalizePhone(to),
+    to: recipientAddress(to),
     type: "document",
     document: {
       link,

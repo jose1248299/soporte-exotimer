@@ -14,31 +14,101 @@ const { findOrCreateSupportCase, pickCompetitionId } = require("./supportCases")
 const { downloadMedia, sendTextMessage } = require("./waba");
 const { normalizeDorsalReferences } = require("../utils/dorsal");
 const { normalizePhone } = require("../utils/phone");
+const {
+  isWhatsappUserId,
+  normalizeWhatsappRecipient,
+  normalizeWhatsappUserId,
+  whatsappConversationRecipient,
+} = require("../utils/whatsapp");
 
 const replyDebounceTimers = new Map();
 const processorStartedAt = new Date();
 
-async function findOrCreateConversation({ phone, displayName, channel = "WHATSAPP", userType, touchLastMessageAt = true }) {
-  const existing = await prisma.conversation.findUnique({
-    where: { channel_phone: { channel, phone } },
-  });
+async function findOrCreateConversation({
+  phone,
+  whatsappUserId,
+  displayName,
+  channel = "WHATSAPP",
+  userType,
+  touchLastMessageAt = true,
+}) {
+  const stableUserId =
+    channel === "WHATSAPP"
+      ? normalizeWhatsappUserId(whatsappUserId)
+      : "";
+  const address =
+    channel === "WHATSAPP" ? normalizeWhatsappRecipient(phone) : phone;
+  if (!address && !stableUserId) {
+    throw new Error("La conversacion no tiene un identificador de remitente valido.");
+  }
+
+  let existing = stableUserId
+    ? await prisma.conversation.findUnique({
+        where: {
+          channel_whatsappUserId: {
+            channel,
+            whatsappUserId: stableUserId,
+          },
+        },
+      })
+    : null;
+  let conversationPhone = address || stableUserId;
+
+  if (!existing && address) {
+    existing = await prisma.conversation.findUnique({
+      where: { channel_phone: { channel, phone: address } },
+    });
+    if (
+      existing?.whatsappUserId &&
+      stableUserId &&
+      existing.whatsappUserId !== stableUserId
+    ) {
+      existing = null;
+      conversationPhone = stableUserId;
+    }
+  }
 
   if (!existing) {
-    return prisma.conversation.create({
-      data: {
-        channel,
-        phone,
-        displayName,
-        userType: userType || undefined,
-        lastMessageAt: new Date(),
-      },
-    });
+    try {
+      return await prisma.conversation.create({
+        data: {
+          channel,
+          phone: conversationPhone,
+          whatsappUserId: stableUserId || undefined,
+          displayName,
+          userType: userType || undefined,
+          lastMessageAt: new Date(),
+        },
+      });
+    } catch (error) {
+      if (error?.code !== "P2002") throw error;
+      existing = stableUserId
+        ? await prisma.conversation.findUnique({
+            where: {
+              channel_whatsappUserId: {
+                channel,
+                whatsappUserId: stableUserId,
+              },
+            },
+          })
+        : null;
+      if (!existing) {
+        existing = await prisma.conversation.findUnique({
+          where: { channel_phone: { channel, phone: conversationPhone } },
+        });
+      }
+      if (!existing) throw error;
+    }
   }
 
   return prisma.conversation.update({
     where: { id: existing.id },
     data: {
       displayName: displayName || undefined,
+      whatsappUserId:
+        stableUserId && !existing.whatsappUserId
+          ? stableUserId
+          : undefined,
       userType:
         channel === "EXOTIMER" && userType === "SYSTEM_USER"
           ? "SYSTEM_USER"
@@ -1418,7 +1488,10 @@ async function processConversationReply(conversationId) {
     const actionInput = {
       ...classification.actionInput,
       source: isExotimer ? "exotimer" : "whatsapp",
-      phone: conversation.phone,
+      phone: isWhatsappUserId(conversation.phone)
+        ? classification.actionInput?.phone
+        : conversation.phone,
+      whatsappUserId: conversation.whatsappUserId || undefined,
       conversationId: conversation.id,
       message: processableText,
       messageId: triggerMessage.id,
@@ -1484,7 +1557,7 @@ async function processConversationReply(conversationId) {
     } else {
       try {
         if (classification.action === "EXOTIMER_SEND_INSCRIPTION_CONFIRMATION_WHATSAPP" && isWhatsapp) {
-          actionInput.whatsappTo = conversation.phone;
+          actionInput.whatsappTo = whatsappConversationRecipient(conversation);
         }
         actionResult = await executeAction(userType, classification.action, actionInput, {
           allowByPolicy: true,
@@ -1591,7 +1664,10 @@ async function processConversationReply(conversationId) {
   let sent = null;
   if (isWhatsapp) {
     try {
-      sent = await sendTextMessage(conversation.phone, reply);
+      sent = await sendTextMessage(
+        whatsappConversationRecipient(conversation),
+        reply
+      );
     } catch (error) {
       console.error("No se pudo enviar respuesta WhatsApp:", error.response?.data || error.message);
     }
@@ -1604,6 +1680,7 @@ async function processConversationReply(conversationId) {
       competitionId: competitionId || null,
       direction: "OUTBOUND",
       phone: conversation.phone,
+      whatsappUserId: conversation.whatsappUserId || null,
       content: reply,
       aiMetadata: {
         classification,
@@ -1630,19 +1707,39 @@ async function processConversationReply(conversationId) {
   };
 }
 
-async function processInboundMessage({ waId, from, text = "", timestamp, rawPayload, displayName, type = "text", media }) {
-  const phone = normalizePhone(from);
+async function processInboundMessage({
+  waId,
+  from,
+  whatsappUserId,
+  text = "",
+  timestamp,
+  rawPayload,
+  displayName,
+  type = "text",
+  media,
+}) {
+  const stableUserId = normalizeWhatsappUserId(whatsappUserId);
+  const phone = normalizeWhatsappRecipient(from || stableUserId);
+  if (!phone) throw new Error("Remitente de WhatsApp invalido.");
 
   if (waId) {
     const duplicate = await prisma.message.findUnique({ where: { waId } });
     if (duplicate) return { duplicated: true };
   }
 
-  const timer = await prisma.timerContact.findFirst({
-    where: { phone, active: true },
+  const conversation = await findOrCreateConversation({
+    phone,
+    whatsappUserId: stableUserId,
+    displayName,
   });
-
-  const conversation = await findOrCreateConversation({ phone, displayName });
+  const timerPhone = isWhatsappUserId(conversation.phone)
+    ? null
+    : normalizePhone(conversation.phone);
+  const timer = timerPhone
+    ? await prisma.timerContact.findFirst({
+        where: { phone: timerPhone, active: true },
+      })
+    : null;
   const previousMessages = await prisma.message.findMany({
     where: { conversationId: conversation.id },
     orderBy: { timestamp: "desc" },
@@ -1716,6 +1813,7 @@ async function processInboundMessage({ waId, from, text = "", timestamp, rawPayl
       direction: "INBOUND",
       contentType,
       phone,
+      whatsappUserId: stableUserId || null,
       content,
       ...(mediaPayload || {}),
       mediaAnalysis,

@@ -1,6 +1,7 @@
 const express = require("express");
 const prisma = require("../lib/prisma");
 const { sendTextMessage } = require("../services/waba");
+const { whatsappConversationRecipient } = require("../utils/whatsapp");
 
 const router = express.Router();
 
@@ -13,6 +14,7 @@ const messageSelect = {
   direction: true,
   contentType: true,
   phone: true,
+  whatsappUserId: true,
   content: true,
   mediaId: true,
   mediaMimeType: true,
@@ -93,7 +95,10 @@ router.post("/:id/messages", async (req, res) => {
 
   let sent = null;
   try {
-    sent = await sendTextMessage(conversation.phone, content);
+    sent = await sendTextMessage(
+      whatsappConversationRecipient(conversation),
+      content
+    );
   } catch (error) {
     console.error("No se pudo enviar mensaje WhatsApp:", error.response?.data || error.message);
     return res.status(502).json({ error: "No se pudo enviar por WhatsApp" });
@@ -104,6 +109,7 @@ router.post("/:id/messages", async (req, res) => {
       conversationId: conversation.id,
       direction: "OUTBOUND",
       phone: conversation.phone,
+      whatsappUserId: conversation.whatsappUserId || null,
       content,
       aiMetadata: {
         manual: true,
