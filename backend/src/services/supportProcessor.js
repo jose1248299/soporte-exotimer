@@ -13,6 +13,7 @@ const { sendNewMessageNotification } = require("./pushNotifications");
 const { findOrCreateSupportCase, pickCompetitionId } = require("./supportCases");
 const { downloadMedia, sendTextMessage } = require("./waba");
 const { normalizeDorsalReferences } = require("../utils/dorsal");
+const { isVideoFinishEvidence } = require("../utils/videoFinish");
 const { normalizePhone } = require("../utils/phone");
 const {
   isWhatsappUserId,
@@ -464,6 +465,12 @@ function mergeClassificationWithConversation(classification, conversation) {
   const previous = conversation.classification || {};
   const previousInput = previous.actionInput || {};
   const nextInput = classification.actionInput || {};
+  if (isVideoFinishEvidence(nextInput)) {
+    return {
+      ...classification,
+      actionInput: normalizeDorsalReferences(nextInput),
+    };
+  }
   const mergedInput = mergeActionInput(previousInput, nextInput);
   const hasPreviousContext = previous.userType && previous.userType !== "UNKNOWN";
 
@@ -498,6 +505,8 @@ function actionNeedsCompetitionId(actionName) {
     "EXOTIMER_RESEND_INSCRIPTION_CONFIRMATION",
     "EXOTIMER_SEND_INSCRIPTION_CONFIRMATION_WHATSAPP",
     "EXOTIMER_GET_RESULTS",
+    "EXOTIMER_CHECK_VIDEO_FINISH_AVAILABILITY",
+    "EXOTIMER_VALIDATE_VIDEO_FINISH_FINDING",
     "EXOTIMER_UPDATE_RESULT_PARTICIPANT_DATA",
     "EXOTIMER_UPDATE_RESULT_DORSAL",
     "EXOTIMER_UPDATE_RESULT_EVENT_CATEGORY",
@@ -573,6 +582,42 @@ function missingFieldsForAction(actionName, input = {}) {
 
   if (actionName === "EXOTIMER_GET_INSCRIPTION" && !(input.dorsal || input.bib)) {
     missing.push("dorsal");
+  }
+
+  if (actionName === "EXOTIMER_CHECK_VIDEO_FINISH_AVAILABILITY") {
+    const hasApproximateTime = Boolean(
+      input.approximateTime ||
+        input.estimatedTime ||
+        input.videoFinishEstimatedTime ||
+        input.horaAproximada ||
+        input.finishClock
+    );
+    if (!hasApproximateTime) missing.push("approximateTime");
+  }
+
+  if (actionName === "EXOTIMER_VALIDATE_VIDEO_FINISH_FINDING") {
+    const hasResultReference = Boolean(
+      input.resultId || input.result_id || input.dorsal || input.bib
+    );
+    if (!hasResultReference) missing.push("dorsal_or_resultId");
+    if (!(input.participantName || input.athleteName)) {
+      missing.push("participantName");
+    }
+    if (!(input.videoFinishDistance || input.declaredDistance || input.distance)) {
+      missing.push("distance");
+    }
+    if (
+      !(
+        input.videoFinishCameraTimestamp ||
+        input.cameraTimestamp ||
+        input.evidenceFinishDateTime
+      )
+    ) {
+      missing.push("cameraTimestamp");
+    }
+    if (!(input.videoFinishVisualDetail || input.visualDetail || input.detail)) {
+      missing.push("visualDetail");
+    }
   }
 
   if (
@@ -713,6 +758,17 @@ function missingFieldsForAction(actionName, input = {}) {
     );
     if (!hasResultReference) missing.push("dorsal_or_resultId");
     if (!hasEvidenceFinishTime) missing.push("evidenceFinishTime");
+    if (isVideoFinishEvidence(input)) {
+      if (!(input.participantName || input.athleteName)) {
+        missing.push("participantName");
+      }
+      if (!(input.videoFinishDistance || input.declaredDistance || input.distance)) {
+        missing.push("distance");
+      }
+      if (!(input.videoFinishVisualDetail || input.visualDetail || input.detail)) {
+        missing.push("visualDetail");
+      }
+    }
   }
 
   if (

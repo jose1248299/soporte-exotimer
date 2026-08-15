@@ -31,6 +31,9 @@ const config = {
   support: {
     replyDebounceMs: Number(process.env.SUPPORT_REPLY_DEBOUNCE_MS || 8000),
   },
+  finisherData: {
+    publicUrl: (process.env.FINISHER_DATA_PUBLIC_URL || "https://finisherdata.com").replace(/\/+$/, ""),
+  },
   push: {
     vapidSubject: process.env.PUSH_VAPID_SUBJECT || process.env.PUBLIC_BASE_URL || "mailto:soporte@finisherdata.com",
     vapidPublicKey: process.env.PUSH_VAPID_PUBLIC_KEY,

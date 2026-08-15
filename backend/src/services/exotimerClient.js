@@ -4,6 +4,12 @@ const prisma = require("../lib/prisma");
 const { normalizeDorsal, normalizeDorsalReferences } = require("../utils/dorsal");
 const { apiMultipartRequest, apiRequest, loginRaceline } = require("./racelineClient");
 const { sendDocumentMessage } = require("./waba");
+const { requestRecoveryRecording } = require("./videoFinishClient");
+const {
+  VIDEO_FINISH_EVIDENCE_POLICY,
+  isVideoFinishEvidence,
+  normalizeVideoFinishClock,
+} = require("../utils/videoFinish");
 
 const SAFE_READ = "safe_read";
 const SAFE_WRITE = "safe_write";
@@ -79,6 +85,18 @@ const ACTIONS = {
     roles: ["TIMER", "ATHLETE"],
     risk: SAFE_READ,
     description: "Consulta detalle de uno o varios resultados.",
+  },
+  EXOTIMER_CHECK_VIDEO_FINISH_AVAILABILITY: {
+    roles: ["TIMER", "ATHLETE"],
+    risk: SAFE_READ,
+    description:
+      "Comprueba evento, resultados, camara y grabacion antes de enviar el enlace publico de recuperacion Video Finish.",
+  },
+  EXOTIMER_VALIDATE_VIDEO_FINISH_FINDING: {
+    roles: ["TIMER", "ATHLETE"],
+    risk: SAFE_READ,
+    description:
+      "Valida un hallazgo estructurado de Video Finish y calcula la hora de meta ajustada por la sincronizacion de la camara.",
   },
   EXOTIMER_CREATE_RESULT_CORRECTION_CASE: {
     roles: ["ATHLETE"],
@@ -4066,7 +4084,7 @@ function parseLocalDateTime(value) {
   if (!raw) return null;
 
   const iso = raw.match(
-    /^(\d{4})-(\d{2})-(\d{2})[T\s](\d{1,2}):(\d{2})(?::(\d{2}))?((?:[+-]\d{2}:\d{2})|Z)?/
+    /^(\d{4})-(\d{2})-(\d{2})[T\s](\d{1,2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?((?:[+-]\d{2}:\d{2})|Z)?/
   );
   if (iso) {
     if (iso[7] === "Z") {
@@ -4377,6 +4395,362 @@ function subtractDuration(parts, seconds) {
     datePartsToUtcMs(parts) - seconds * 1000,
     parts.offset || "-05:00"
   );
+}
+
+function findNestedNumber(value, wantedKeys, depth = 0, seen = new Set()) {
+  if (!value || typeof value !== "object" || depth > 6 || seen.has(value)) {
+    return null;
+  }
+  seen.add(value);
+
+  for (const [key, candidate] of Object.entries(value)) {
+    if (wantedKeys.has(normalizeText(key))) {
+      const number = Number(candidate);
+      if (Number.isFinite(number)) return number;
+    }
+  }
+
+  for (const candidate of Object.values(value)) {
+    const found = findNestedNumber(candidate, wantedKeys, depth + 1, seen);
+    if (found != null) return found;
+  }
+  return null;
+}
+
+function videoFinishGapSeconds(competition = {}) {
+  return (
+    findNestedNumber(
+      competition.description || competition,
+      new Set(["gapvideo", "gap_video", "video_gap_seconds"])
+    ) || 0
+  );
+}
+
+function videoFinishCameraId(camera = {}) {
+  return clean(
+    camera.provider_camera_id ||
+      camera.metadata_json?.provider_camera_id ||
+      camera.angelcam_id ||
+      camera.metadata_json?.angelcam_id
+  );
+}
+
+function buildVideoFinishPublicSlug(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function buildVideoFinishPublicUrl(competition = {}, competitionId) {
+  const slug = buildVideoFinishPublicSlug(competition.name);
+  if (!slug) return null;
+  return `${config.finisherData.publicUrl}/eventos/${slug}/videofinish?id_event=${encodeURIComponent(
+    competitionId
+  )}&recuperar=1`;
+}
+
+function videoFinishClockFromParts(parts) {
+  if (!parts?.time) return null;
+  return `${pad2(parts.time.hours)}:${pad2(parts.time.minutes)}:${pad2(
+    parts.time.seconds
+  )}`;
+}
+
+function videoFinishDateFromParts(parts) {
+  if (!parts?.date) return null;
+  return `${parts.date.year}-${pad2(parts.date.month)}-${pad2(parts.date.day)}`;
+}
+
+function videoFinishUnavailableReason(status, data = {}) {
+  const reasons = {
+    400: "invalid_competition_or_time",
+    404: "recording_not_found",
+    410: "recording_expired",
+    422: "invalid_recording_time",
+    502: "video_provider_error",
+    503: "video_service_not_configured",
+  };
+  return {
+    code: reasons[status] || "video_service_error",
+    message: clean(data.error) || "La grabacion no esta disponible.",
+    status,
+  };
+}
+
+async function loadVideoFinishContext(resolvedInput) {
+  const competitionId = pickCompetitionId(resolvedInput);
+  const [competition, finalizedResults, camera] = await Promise.all([
+    apiRequest({
+      path: `/catalog/api/v1/competitions/${competitionId}/full`,
+    }),
+    apiRequest({
+      path: "/results/api/v1/results/",
+      params: {
+        competition_id: Number(competitionId),
+        state: "finalizado",
+        limit: 1,
+        offset: 0,
+      },
+    }),
+    apiRequest({
+      path: `/timing/api/v1/devices/competitions/${competitionId}/camera`,
+    }).catch((error) => ({
+      _requestError: error.message,
+      _status: error.response?.status || null,
+    })),
+  ]);
+
+  return {
+    competitionId,
+    competition,
+    finalizedResults: asArray(finalizedResults),
+    camera,
+    cameraId: videoFinishCameraId(camera),
+    gapSeconds: videoFinishGapSeconds(competition),
+  };
+}
+
+async function checkVideoFinishAvailability(input = {}, preparedContext = null) {
+  const resolvedInput = await resolveCompetitionInput(input);
+  const approximateTime = normalizeVideoFinishClock(
+    input.approximateTime ||
+      input.estimatedTime ||
+      input.videoFinishEstimatedTime ||
+      input.horaAproximada ||
+      input.finishClock
+  );
+  if (!approximateTime) {
+    throw new Error(
+      "Falta la hora aproximada del dia en formato HH:mm:ss para comprobar Video Finish."
+    );
+  }
+
+  const context = preparedContext || (await loadVideoFinishContext(resolvedInput));
+  const checks = {
+    competition: {
+      ok: Boolean(context.competition?.id),
+      endpoint: `/catalog/api/v1/competitions/${context.competitionId}/full`,
+    },
+    finalizedResults: {
+      ok: context.finalizedResults.length > 0,
+      count: context.finalizedResults.length,
+      endpoint: "/results/api/v1/results/",
+    },
+    camera: {
+      ok: Boolean(context.cameraId && context.camera?.active !== false),
+      active: context.camera?.active !== false,
+      endpoint: `/timing/api/v1/devices/competitions/${context.competitionId}/camera`,
+    },
+  };
+
+  if (!checks.competition.ok) {
+    return {
+      available: false,
+      reason: { code: "competition_not_found" },
+      checks,
+    };
+  }
+  if (!checks.finalizedResults.ok) {
+    return {
+      available: false,
+      reason: { code: "no_finalized_results" },
+      checks,
+      competitionId: context.competitionId,
+      competitionName: context.competition.name || null,
+    };
+  }
+  if (!checks.camera.ok) {
+    return {
+      available: false,
+      reason: {
+        code: "camera_not_configured",
+        message: context.camera?._requestError || null,
+      },
+      checks,
+      competitionId: context.competitionId,
+      competitionName: context.competition.name || null,
+    };
+  }
+
+  const recovery = await requestRecoveryRecording({
+    competitionId: context.competitionId,
+    time: approximateTime,
+  });
+  const recordingAvailable = Boolean(
+    recovery.status === 200 && clean(recovery.data?.url)
+  );
+  checks.recording = {
+    ok: recordingAvailable,
+    status: recovery.status,
+    endpoint: "/api/video-finish/recovery-recording",
+  };
+
+  if (!recordingAvailable) {
+    return {
+      available: false,
+      reason: videoFinishUnavailableReason(recovery.status, recovery.data),
+      checks,
+      competitionId: context.competitionId,
+      competitionName: context.competition.name || null,
+      approximateTime,
+    };
+  }
+
+  return {
+    available: true,
+    type: "VIDEO_FINISH_AVAILABILITY",
+    competitionId: context.competitionId,
+    competitionName: context.competition.name || null,
+    competitionDate: String(context.competition.start_date || "").slice(0, 10) || null,
+    approximateTime,
+    publicRecoveryUrl: buildVideoFinishPublicUrl(
+      context.competition,
+      context.competitionId
+    ),
+    gapSeconds: context.gapSeconds,
+    checks,
+    recording: {
+      recordingStart: recovery.data.recordingStart || null,
+      targetAt: recovery.data.targetAt || null,
+      leadSeconds: recovery.data.leadSeconds || null,
+    },
+  };
+}
+
+function sameVideoFinishDistance(declared, actual) {
+  const left = normalizeText(declared).replace(/\s+/g, "");
+  const right = normalizeText(actual).replace(/\s+/g, "");
+  if (!left || !right) return true;
+  return left === right;
+}
+
+async function validateVideoFinishFinding(input = {}) {
+  const resolvedInput = await resolveCompetitionInput(input);
+  const context = await loadVideoFinishContext(resolvedInput);
+  const dorsal = normalizeDorsal(
+    input.dorsal || input.bib || input.currentDorsal
+  );
+  const participantName = clean(input.participantName || input.athleteName);
+  const declaredDistance = clean(
+    input.videoFinishDistance || input.declaredDistance || input.distance
+  );
+  const visualDetail = clean(
+    input.videoFinishVisualDetail || input.visualDetail || input.detail
+  );
+  const cameraTimestamp =
+    input.videoFinishCameraTimestamp ||
+    input.cameraTimestamp ||
+    input.evidenceFinishDateTime;
+  const cameraParts = parseLocalDateTime(cameraTimestamp);
+
+  if (!dorsal || !participantName || !declaredDistance || !visualDetail || !cameraParts) {
+    return {
+      valid: false,
+      readyForCorrection: false,
+      reason: { code: "incomplete_video_finish_finding" },
+      missing: [
+        !dorsal && "dorsal",
+        !participantName && "participantName",
+        !declaredDistance && "distance",
+        !visualDetail && "visualDetail",
+        !cameraParts && "cameraTimestamp",
+      ].filter(Boolean),
+    };
+  }
+
+  const correctedParts = utcMsToDateParts(
+    datePartsToUtcMs(cameraParts) - context.gapSeconds * 1000,
+    cameraParts.offset || "-05:00"
+  );
+  const correctedFinishDateTime = formatIsoLocal(correctedParts);
+  const correctedClock = videoFinishClockFromParts(correctedParts);
+  const competitionDate = String(context.competition.start_date || "").slice(0, 10);
+  const correctedDate = videoFinishDateFromParts(correctedParts);
+  if (competitionDate && correctedDate !== competitionDate) {
+    return {
+      valid: false,
+      readyForCorrection: false,
+      reason: { code: "video_timestamp_outside_competition_date" },
+      competitionDate,
+      correctedDate,
+    };
+  }
+
+  const availability = await checkVideoFinishAvailability(
+    {
+      ...resolvedInput,
+      approximateTime: correctedClock,
+    },
+    context
+  );
+  if (!availability.available) {
+    return {
+      valid: false,
+      readyForCorrection: false,
+      reason: availability.reason,
+      availability,
+    };
+  }
+
+  const resultRows = await getResults({ ...resolvedInput, dorsal });
+  if (resultRows.length !== 1) {
+    return {
+      valid: false,
+      readyForCorrection: false,
+      reason: {
+        code: resultRows.length ? "ambiguous_dorsal" : "result_not_found",
+      },
+      matches: resultRows.length,
+      availability,
+    };
+  }
+
+  const result = resultRows[0];
+  const actualDistance = clean(
+    result.event_name || result.evento || result.event?.name
+  );
+  if (!sameVideoFinishDistance(declaredDistance, actualDistance)) {
+    return {
+      valid: false,
+      readyForCorrection: false,
+      reason: { code: "distance_mismatch" },
+      declaredDistance,
+      actualDistance,
+      availability,
+    };
+  }
+
+  const registeredName = clean(
+    result.participant_display_name || result.participantName
+  );
+  const nameMatches =
+    !registeredName ||
+    normalizeText(registeredName) === normalizeText(participantName);
+
+  return {
+    valid: true,
+    readyForCorrection: true,
+    type: "VIDEO_FINISH_FINDING_VALIDATION",
+    evidencePolicy: VIDEO_FINISH_EVIDENCE_POLICY,
+    competitionId: context.competitionId,
+    competitionName: context.competition.name || null,
+    resultId: result.id || result.result_id || result.resultId || null,
+    dorsal,
+    participantName,
+    registeredName,
+    declaredDistance,
+    actualDistance,
+    visualDetail,
+    cameraTimestamp: formatIsoLocal(cameraParts),
+    cameraGapSeconds: context.gapSeconds,
+    correctedFinishDateTime,
+    correctedFinishClock: correctedClock,
+    warnings: nameMatches ? [] : ["participant_name_differs_from_result"],
+    availability,
+  };
 }
 
 function requestedValue(input = {}) {
@@ -4900,7 +5274,34 @@ function buildTimeCorrectionCurrent({ input, detail, finishParts }) {
 }
 
 async function applyResultTimeEvidenceCorrection(input = {}) {
-  const normalizedInput = await resolveCompetitionInput(normalizeDorsalReferences(input));
+  let normalizedInput = await resolveCompetitionInput(normalizeDorsalReferences(input));
+  let videoFinishValidation = null;
+  if (isVideoFinishEvidence(normalizedInput)) {
+    videoFinishValidation = await validateVideoFinishFinding(normalizedInput);
+    if (!videoFinishValidation.valid || !videoFinishValidation.readyForCorrection) {
+      throw new Error(
+        `Hallazgo Video Finish no validado: ${
+          videoFinishValidation.reason?.code || "invalid_finding"
+        }.`
+      );
+    }
+    normalizedInput = {
+      ...normalizedInput,
+      resultId: normalizedInput.resultId || videoFinishValidation.resultId,
+      dorsal: videoFinishValidation.dorsal,
+      participantName: videoFinishValidation.participantName,
+      evidenceFinishDateTime: videoFinishValidation.correctedFinishDateTime,
+      evidenceConfidence: 0.95,
+      hasStrongEvidence: true,
+      evidenceSummary: [
+        normalizedInput.evidenceSummary,
+        `Video Finish validado; hora de camara ajustada ${videoFinishValidation.cameraGapSeconds} segundos.`,
+      ]
+        .filter(Boolean)
+        .join(" "),
+      videoFinishValidation,
+    };
+  }
   const competitionId = pickCompetitionId(normalizedInput);
   const { resultId, detail } = await resolveResultForUpdate(normalizedInput);
   const trustAssessment = buildAthleteEvidenceTrustAssessment(normalizedInput, detail);
@@ -4934,13 +5335,27 @@ async function applyResultTimeEvidenceCorrection(input = {}) {
 
   const timingMode = resultTimingMode(detail);
   const isChipTiming = timingMode === "tiempo_chip";
-  const requestedSeconds = pickRequestedSeconds(normalizedInput);
+  let requestedSeconds = pickRequestedSeconds(normalizedInput);
+  const existingStartRaw = isChipTiming ? assignedPointRaw(detail, "salida") : null;
+  if (isChipTiming && requestedSeconds == null && existingStartRaw) {
+    const startParts = parseLocalDateTime(
+      existingStartRaw.hour || existingStartRaw.zulu
+    );
+    if (startParts) {
+      const derivedSeconds = Math.round(
+        (datePartsToUtcMs(finishParts) - datePartsToUtcMs(startParts)) / 1000
+      );
+      if (derivedSeconds > 0) {
+        requestedSeconds = derivedSeconds;
+        normalizedInput.requestedValue = formatDuration(derivedSeconds);
+      }
+    }
+  }
   if (isChipTiming && requestedSeconds == null) {
     throw new Error(
-      "El evento usa tiempo_chip y falta la duracion solicitada para construir una salida individual coherente."
+      "El evento usa tiempo_chip y no se pudo calcular la duracion desde una salida individual existente."
     );
   }
-  const existingStartRaw = isChipTiming ? assignedPointRaw(detail, "salida") : null;
   const timeCurrent =
     isChipTiming && requestedSeconds != null
       ? formatDuration(requestedSeconds)
@@ -5108,7 +5523,12 @@ async function applyResultTimeEvidenceCorrection(input = {}) {
     created: true,
     type: "RESULT_TIME_EVIDENCE_CORRECTION",
     timingMode: timingMode || null,
-    evidencePolicy: trustAssessment.enabled ? "TRUST_ATHLETE_EVIDENCE" : "STRICT_EVIDENCE",
+    evidencePolicy: videoFinishValidation
+      ? VIDEO_FINISH_EVIDENCE_POLICY
+      : trustAssessment.enabled
+        ? "TRUST_ATHLETE_EVIDENCE"
+        : "STRICT_EVIDENCE",
+    videoFinishValidation,
     evidenceTrustAssessment: trustAssessment,
     changed: {
       competitionId,
@@ -5190,6 +5610,8 @@ const HANDLERS = {
   EXOTIMER_SEND_INSCRIPTION_CONFIRMATION_WHATSAPP: sendInscriptionConfirmationWhatsApp,
   EXOTIMER_GET_RESULTS: getResults,
   EXOTIMER_GET_RESULT_DETAIL: getResultDetail,
+  EXOTIMER_CHECK_VIDEO_FINISH_AVAILABILITY: checkVideoFinishAvailability,
+  EXOTIMER_VALIDATE_VIDEO_FINISH_FINDING: validateVideoFinishFinding,
   EXOTIMER_CREATE_RESULT_CORRECTION_CASE: createResultCorrectionCase,
   EXOTIMER_UPDATE_RESULT_PARTICIPANT_DATA: updateResultParticipantData,
   EXOTIMER_UPDATE_RESULT_DORSAL: updateResultDorsal,

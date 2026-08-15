@@ -6,6 +6,7 @@ const {
   buildExotimerAssistantKnowledge,
   buildTimerAssistantKnowledge,
 } = require("./exotimerKnowledge");
+const { parseVideoFinishFindingMessage } = require("../utils/videoFinish");
 
 const actionNames = Object.keys(ACTIONS);
 
@@ -200,6 +201,20 @@ async function classifyMessage({
   channel = "WHATSAPP",
   trustedSystemUser = false,
 }) {
+  const videoFinishFinding = parseVideoFinishFindingMessage(text);
+  if (videoFinishFinding) {
+    return {
+      userType: forcedTimer ? "TIMER" : "ATHLETE",
+      confidence: 0.99,
+      intent: "video_finish_self_service_finding",
+      summary:
+        "El participante envio un hallazgo estructurado desde Video Finish.",
+      action: "EXOTIMER_APPLY_RESULT_TIME_EVIDENCE_CORRECTION",
+      actionInput: videoFinishFinding,
+      needsHuman: false,
+    };
+  }
+
   const timerCreationContext = forcedTimer
     ? isTimerCompetitionCreationContext({ text, previousClassification, history })
     : false;
@@ -278,6 +293,10 @@ async function classifyMessage({
     "- Si el usuario consulta resultados y da competencia+dorsal, usa EXOTIMER_GET_RESULTS con competitionId/competitionName y dorsal. No uses EXOTIMER_GET_INSCRIPTION para comprobar resultados.",
     "- No ejecutes cambios tecnicos genericos, raws manuales libres ni tickets sin confirmacion humana: usa la accion, pero needsHuman=true.",
     "- Para cambios de TIEMPO de carrera de atletas, usa EXOTIMER_CREATE_RESULT_CORRECTION_CASE o humano solo cuando falten señales minimas. Se permite TRUST_ATHLETE_EVIDENCE para ser mas credulo con evidencia combinada razonable.",
+    "- Si el atleta no tiene tiempo oficial y entrega competitionId o competitionName, dorsal y una hora aproximada del dia en la que cruzo la meta, usa EXOTIMER_CHECK_VIDEO_FINISH_AVAILABILITY con approximateTime en formato HH:mm:ss. Si falta la hora aproximada, usa action=null y pidela.",
+    "- Solo ofrece la URL publica de Video Finish cuando EXOTIMER_CHECK_VIDEO_FINISH_AVAILABILITY devuelva available=true. Nunca inventes el enlace ni expongas una URL temporal del proveedor de video.",
+    "- El mensaje [HALLAZGO GENERADO POR FINISHER DATA] se procesa de forma deterministica. Sus datos deben conservarse literalmente y la accion valida evento, camara, grabacion, dorsal, distancia y timestamp antes de cualquier escritura.",
+    "- En Video Finish, Timestamp exacto de camara incluye el desfase tecnico de la camara. No lo ajustes en el prompt: el backend resta gapVideo y produce evidenceFinishDateTime canonico.",
     "- Puedes usar EXOTIMER_APPLY_RESULT_TIME_EVIDENCE_CORRECTION con needsHuman=false si la conversacion tiene competitionId o competitionName, dorsal/resultId, tiempo solicitado y evidencia objetiva fuerte o evidencia combinada razonable bajo TRUST_ATHLETE_EVIDENCE.",
     "- TRUST_ATHLETE_EVIDENCE aplica cuando hay reclamo estructurado desde la web publica o contexto claro con competitionId+dorsal+atleta, mas al menos dos o tres senales: GPS/Strava/Garmin/reloj con tiempo o duracion, foto del dorsal antes/durante/meta, foto oficial cruzando meta, fecha/hora compatible, distancia/evento compatible, resultado actual sin tiempo/en carrera. En ese caso incluye trustAthleteEvidence=true y evidencePolicy='TRUST_ATHLETE_EVIDENCE'.",
     "- Bajo TRUST_ATHLETE_EVIDENCE no exijas que una sola imagen contenga nombre+dorsal+tiempo. Acepta evidencia repartida en varias imagenes/mensajes si el hilo completo es coherente y el reclamo no afecta una situacion sensible evidente.",
@@ -438,6 +457,9 @@ async function composeReply({
             "Si contextActionResult.followUpResolution.type es RESULT_ALREADY_UPDATED, informa que ya verificaste ExoTimer, menciona tiempo oficial, distancia/evento y dorsal actual, pide actualizar la pagina de resultados y cierra amablemente sin decir que sigue en revision.",
             "Si contextActionResult.followUpResolution.type es RESULT_TIME_UPDATED_DORSAL_PENDING, informa que el tiempo ya figura actualizado, pero que el dorsal visible aun queda pendiente de revision. Menciona el dorsal actual y el dorsal solicitado.",
             "Si se ejecuto EXOTIMER_APPLY_RESULT_TIME_EVIDENCE_CORRECTION, confirma la correccion y pide refrescar la pagina solo cuando actionResult.verification.verified=true. Si es false, informa que la escritura se intento pero la lectura posterior aun no coincide y que el caso queda en revision.",
+            "Si se ejecuto EXOTIMER_CHECK_VIDEO_FINISH_AVAILABILITY y actionResult.available=true, comparte exactamente actionResult.publicRecoveryUrl. Indica que debe buscar su llegada, ubicar el instante preciso y usar los botones de la pagina para enviar por WhatsApp el hallazgo generado. Si available=false, explica brevemente el motivo indicado en actionResult.reason y no compartas enlace.",
+            "Si se ejecuto EXOTIMER_VALIDATE_VIDEO_FINISH_FINDING, informa si el hallazgo quedo validado, pero no afirmes que el tiempo fue corregido porque esa accion solo consulta.",
+            "Si una correccion usa actionResult.evidencePolicy=VIDEO_FINISH_SELF_SERVICE, explica que el hallazgo de Video Finish fue validado contra el evento y confirma el nuevo tiempo solo si actionResult.verification.verified=true.",
             "Si se ejecuto EXOTIMER_RESEND_INSCRIPTION_CONFIRMATION, informa que verificaste la inscripcion, aclara que la API nueva no permite reenviar el email y ofrece enviar el comprobante por WhatsApp. Nunca afirmes que el correo fue reenviado.",
             "Si se ejecuto EXOTIMER_SEND_INSCRIPTION_CONFIRMATION_WHATSAPP, informa que el comprobante PDF con su codigo de confirmacion fue enviado por WhatsApp y que puede revisarlo en este chat.",
             "Si classification.action es EXOTIMER_PREVIEW_COMPETITION_SETUP y actionResult.preview=true, resume nombre, fecha, estado, sede, organizador, eventos, categorias, tickets, precios, pago y archivos. Si readyToApply=true pide una confirmacion explicita para aplicar exactamente ese plan. Si es false, pide solo missingFields y explica duplicados o warnings importantes.",

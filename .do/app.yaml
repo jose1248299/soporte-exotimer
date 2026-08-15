@@ -86,6 +86,9 @@ services:
       - key: PUBLIC_BASE_URL
         value: ${_self.PUBLIC_URL}
         scope: RUN_TIME
+      - key: FINISHER_DATA_PUBLIC_URL
+        value: https://finisherdata.com
+        scope: RUN_TIME
 
 static_sites:
   - name: web
