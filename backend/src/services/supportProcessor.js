@@ -6,6 +6,7 @@ const {
   analyzeImageEvidence,
   classifyMessage,
   composeReply,
+  sanitizeExternalReply,
 } = require("./ai");
 const { executeAction, requiresConfirmation } = require("./exotimerClient");
 const { getPolicy } = require("./supportPolicies");
@@ -1141,8 +1142,8 @@ async function inspectAthleteResultPreflight({
       actionInput: enrichedInput,
       needsHuman: hasPendingDorsalChange,
       summary: hasPendingDorsalChange
-        ? `${classification.summary} El tiempo ya figura actualizado en ExoTimer, pero queda pendiente revisar el cambio de dorsal.`
-        : `${classification.summary} El resultado ya figura actualizado en ExoTimer.`,
+        ? `${classification.summary} El tiempo ya figura actualizado en el sistema de resultados, pero queda pendiente revisar el cambio de dorsal.`
+        : `${classification.summary} El resultado ya figura actualizado en el sistema de resultados.`,
     },
     audit: {
       ...enrichedAudit,
@@ -1206,8 +1207,8 @@ async function persistResultPreflight({
       data: {
         status: hasPendingDorsalChange ? "WAITING_HUMAN" : "RESOLVED",
         summary: hasPendingDorsalChange
-          ? `${supportCase.summary || ""} Tiempo verificado en ExoTimer; queda pendiente validar cambio de dorsal ${actualDorsal} -> ${requestedDorsal}.`.trim()
-          : `${supportCase.summary || ""} Resultado verificado como actualizado en ExoTimer.`.trim(),
+          ? `${supportCase.summary || ""} Tiempo verificado en el sistema de resultados; queda pendiente validar cambio de dorsal ${actualDorsal} -> ${requestedDorsal}.`.trim()
+          : `${supportCase.summary || ""} Resultado verificado como actualizado en el sistema de resultados.`.trim(),
         lastMessageAt: new Date(),
       },
     });
@@ -1716,6 +1717,7 @@ async function processConversationReply(conversationId) {
     classification,
     actionResult,
   });
+  reply = sanitizeExternalReply(reply, conversation.channel);
 
   let sent = null;
   if (isWhatsapp) {

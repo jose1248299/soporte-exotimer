@@ -9,6 +9,7 @@ const {
   resultHasPublishedTime,
   summarizeResultForClosure,
 } = require("./supportProcessor");
+const { sanitizeExternalReply } = require("./ai");
 const {
   normalizeWhatsappRecipient,
   resolveWhatsappIdentity,
@@ -107,6 +108,24 @@ test("una correccion de tiempo verificada conserva la respuesta generada", () =>
   });
 
   assert.equal(reply, original);
+});
+
+test("WhatsApp no expone nombres internos de plataforma o acciones", () => {
+  const reply = sanitizeExternalReply(
+    "Ya verifique en Exo-Timer mediante EXOTIMER_GET_RESULTS y Race Line confirma el tiempo. Revisa https://cloud.exotimer.com/results.",
+    "WHATSAPP"
+  );
+
+  assert.equal(
+    reply,
+    "Ya verifique en nuestro sistema de resultados mediante la operacion solicitada y nuestro sistema de resultados confirma el tiempo. Revisa la plataforma de resultados"
+  );
+  assert.doesNotMatch(reply, /exotimer|race line|EXOTIMER_|raceline/i);
+});
+
+test("el chat interno conserva el nombre ExoTimer", () => {
+  const original = "Revisa la configuracion directamente en ExoTimer.";
+  assert.equal(sanitizeExternalReply(original, "EXOTIMER"), original);
 });
 
 test("un nuevo documento limpia identificadores heredados de otra persona", () => {

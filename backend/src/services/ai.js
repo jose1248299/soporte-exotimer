@@ -411,6 +411,26 @@ function fallbackReply(userType) {
   return "Hola, gracias por escribir a Finisher Data. Cuentame si consultas por inscripciones o resultados de un evento?";
 }
 
+function sanitizeExternalReply(reply, channel = "WHATSAPP") {
+  const text = String(reply || "");
+  if (channel !== "WHATSAPP") return text;
+
+  return text
+    .replace(
+      /\b(?:https?:\/\/)?(?:cloud\.)?exotimer\.com(?:\/\S*)?/gi,
+      "la plataforma de resultados"
+    )
+    .replace(
+      /\b(?:https?:\/\/)?(?:[a-z0-9-]+\.)?raceline\.app(?:\/\S*)?/gi,
+      "nuestro sistema"
+    )
+    .replace(/\bEXOTIMER_[A-Z0-9_]+\b/gi, "la operacion solicitada")
+    .replace(
+      /\b(?:Exo[\s_-]*Timer|Race[\s_-]*Line)\b/gi,
+      "nuestro sistema de resultados"
+    );
+}
+
 async function composeReply({
   userType,
   text,
@@ -452,9 +472,12 @@ async function composeReply({
             "Responde en espanol, breve, amable y accionable. Usa el historial para continuar el caso sin pedir de nuevo datos ya entregados.",
             "No inventes cambios realizados. Si falta informacion, pidela claramente. Si algo quedo pendiente de confirmacion humana, dilo sin afirmar que ya se cambio.",
             "No prometas que avisaras automaticamente cuando haya novedades, porque no existe un disparador garantizado de seguimiento. Indica el estado actual y, si queda pendiente, pide que el equipo humano lo revise o que el usuario vuelva a consultar.",
+            channel === "WHATSAPP"
+              ? "Nunca menciones ExoTimer, Race Line, nombres internos de acciones, endpoints, APIs, bases de datos ni detalles tecnicos de integracion. Para el cliente externo di 'nuestro sistema de resultados', 'la plataforma de resultados' o 'nuestro sistema de inscripciones', segun corresponda."
+              : "",
             "Menciona como atendido, enviado o modificado solamente al participante identificado en actionResult.lookup.bestMatch o actionResult.changed. Nunca extiendas una accion individual a otras personas del chat.",
             "Si actionResult.idempotentReplay=true, explica el resultado ya existente sin afirmar que se volvio a ejecutar o enviar.",
-            "Si contextActionResult.followUpResolution.type es RESULT_ALREADY_UPDATED, informa que ya verificaste ExoTimer, menciona tiempo oficial, distancia/evento y dorsal actual, pide actualizar la pagina de resultados y cierra amablemente sin decir que sigue en revision.",
+            "Si contextActionResult.followUpResolution.type es RESULT_ALREADY_UPDATED, informa que ya verificaste el resultado en el sistema, menciona tiempo oficial, distancia/evento y dorsal actual, pide actualizar la pagina de resultados y cierra amablemente sin decir que sigue en revision.",
             "Si contextActionResult.followUpResolution.type es RESULT_TIME_UPDATED_DORSAL_PENDING, informa que el tiempo ya figura actualizado, pero que el dorsal visible aun queda pendiente de revision. Menciona el dorsal actual y el dorsal solicitado.",
             "Si se ejecuto EXOTIMER_APPLY_RESULT_TIME_EVIDENCE_CORRECTION, confirma la correccion y pide refrescar la pagina solo cuando actionResult.verification.verified=true. Si es false, informa que la escritura se intento pero la lectura posterior aun no coincide y que el caso queda en revision.",
             "Si se ejecuto EXOTIMER_CHECK_VIDEO_FINISH_AVAILABILITY y actionResult.available=true, comparte exactamente actionResult.publicRecoveryUrl. Indica que debe buscar su llegada, ubicar el instante preciso y usar los botones de la pagina para enviar por WhatsApp el hallazgo generado. Si available=false, explica brevemente el motivo indicado en actionResult.reason y no compartas enlace.",
@@ -740,4 +763,5 @@ module.exports = {
   analyzeImageEvidence,
   classifyMessage,
   composeReply,
+  sanitizeExternalReply,
 };
