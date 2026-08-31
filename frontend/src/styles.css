@@ -1208,6 +1208,140 @@ button {
   background: #f7f9fb;
 }
 
+.directory-table-section {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #ffffff;
+}
+
+.directory-table-toolbar {
+  min-height: 62px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 16px;
+  border-bottom: 1px solid #e1e7ef;
+}
+
+.directory-table-toolbar strong {
+  color: #172033;
+  font-size: 14px;
+}
+
+.directory-table-scroll {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+  background: #f7f9fb;
+}
+
+.directory-table {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: collapse;
+  color: #344256;
+  background: #ffffff;
+  font-size: 13px;
+}
+
+.directory-table th,
+.directory-table td {
+  padding: 13px 16px;
+  border-bottom: 1px solid #e1e7ef;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.directory-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  color: #64748b;
+  background: #f7f9fb;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.directory-table tbody tr:hover {
+  background: #f7fcfa;
+}
+
+.directory-table td strong {
+  color: #111827;
+}
+
+.directory-notes {
+  max-width: 340px;
+  overflow: hidden;
+  color: #64748b;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.directory-status {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 5px 9px;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.directory-status.active {
+  color: #0f604f;
+  background: #e5f5ef;
+}
+
+.directory-status.inactive {
+  color: #64748b;
+  background: #e9eef4;
+}
+
+.directory-row-actions {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.directory-row-actions button {
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #d7dee8;
+  border-radius: 8px;
+  padding: 0 10px;
+  color: #0f604f;
+  background: #ffffff;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.directory-row-actions button:hover {
+  border-color: #acd9cc;
+  background: #f0faf6;
+}
+
+.contact-form-modal {
+  width: min(560px, 100%);
+  max-height: min(720px, calc(100dvh - 36px));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid #d7dee8;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 24px 80px rgba(15, 23, 42, 0.28);
+}
+
+.contact-form-modal .timer-form {
+  overflow-y: auto;
+}
+
 .timer-list {
   min-width: 0;
   display: flex;
@@ -1697,6 +1831,12 @@ button {
     height: calc(100dvh - 20px);
   }
 
+  .contact-form-modal {
+    width: 100%;
+    max-height: none;
+    height: calc(100dvh - 20px);
+  }
+
   .action-detail-grid {
     grid-template-columns: 1fr;
   }
@@ -1904,6 +2044,17 @@ button {
     height: 100dvh;
     border: 0;
     border-radius: 0;
+  }
+
+  .contact-form-modal {
+    height: 100dvh;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .directory-table-toolbar {
+    min-height: 58px;
+    padding: 10px;
   }
 
   .action-audit-trigger {

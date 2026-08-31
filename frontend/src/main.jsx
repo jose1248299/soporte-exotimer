@@ -13,6 +13,8 @@ import {
   Image as ImageIcon,
   LockKeyhole,
   MessageCircle,
+  Pencil,
+  Plus,
   Search,
   Send,
   Settings,
@@ -20,6 +22,7 @@ import {
   UserCog,
   UserRound,
   UsersRound,
+  X,
   Zap,
 } from "lucide-react";
 import {
@@ -767,6 +770,7 @@ function ContactDirectoryPage({ directory, onBack }) {
   const [contacts, setContacts] = useState([]);
   const [form, setForm] = useState(EMPTY_CONTACT_FORM);
   const [loadError, setLoadError] = useState("");
+  const [formModalOpen, setFormModalOpen] = useState(false);
 
   const editing = Boolean(form.id);
 
@@ -775,6 +779,7 @@ function ContactDirectoryPage({ directory, onBack }) {
     setLoading(true);
     setLoadError("");
     setForm(EMPTY_CONTACT_FORM);
+    setFormModalOpen(false);
 
     apiFetch(directory.endpoint, { timeoutMs: 10000 })
       .then((res) => {
@@ -811,9 +816,17 @@ function ContactDirectoryPage({ directory, onBack }) {
       active: Boolean(contact.active),
       notes: contact.notes || "",
     });
+    setFormModalOpen(true);
   }
 
-  function resetForm() {
+  function openNewContactModal() {
+    setForm(EMPTY_CONTACT_FORM);
+    setFormModalOpen(true);
+  }
+
+  function closeFormModal() {
+    if (saving) return;
+    setFormModalOpen(false);
     setForm(EMPTY_CONTACT_FORM);
   }
 
@@ -843,7 +856,8 @@ function ContactDirectoryPage({ directory, onBack }) {
           : [...current, saved];
         return next.sort((a, b) => String(a.name).localeCompare(String(b.name)));
       });
-      resetForm();
+      setFormModalOpen(false);
+      setForm(EMPTY_CONTACT_FORM);
     } catch {
       alert(`No se pudo guardar el ${directory.singular}.`);
     } finally {
@@ -879,92 +893,128 @@ function ContactDirectoryPage({ directory, onBack }) {
           </div>
         </header>
 
-        <div className="timers-body">
-          <section className="timer-list" aria-label={`${directory.title} registrados`}>
-            <div className="timer-list-header">
-              <strong>{loading ? "Cargando..." : `${contacts.length} ${directory.title}`}</strong>
-              <button type="button" onClick={resetForm}>
-                Nuevo
-              </button>
+        <section className="directory-table-section" aria-label={`${directory.title} registrados`}>
+          <div className="directory-table-toolbar">
+            <strong>{loading ? "Cargando..." : `${contacts.length} ${directory.title}`}</strong>
+            <button className="primary-action compact" type="button" onClick={openNewContactModal}>
+              <Plus size={17} />
+              Agregar nuevo
+            </button>
+          </div>
+
+          {loadError ? (
+            <div className="config-empty">{loadError}</div>
+          ) : contacts.length === 0 && !loading ? (
+            <div className="config-empty">Todavía no hay {directory.title.toLowerCase()} registrados.</div>
+          ) : (
+            <div className="directory-table-scroll">
+              <table className="directory-table">
+                <thead>
+                  <tr>
+                    <th>Nombre</th>
+                    <th>Teléfono WhatsApp</th>
+                    <th>Notas</th>
+                    <th>Estado</th>
+                    <th aria-label="Acciones" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {contacts.map((contact) => (
+                    <tr key={contact.id}>
+                      <td><strong>{contact.name}</strong></td>
+                      <td>{contact.phone}</td>
+                      <td className="directory-notes" title={contact.notes || ""}>{contact.notes || "—"}</td>
+                      <td>
+                        <span className={`directory-status ${contact.active ? "active" : "inactive"}`}>
+                          {contact.active ? "Activo" : "Inactivo"}
+                        </span>
+                      </td>
+                      <td className="directory-row-actions">
+                        <button type="button" onClick={() => editContact(contact)} aria-label={`Editar ${contact.name}`}>
+                          <Pencil size={15} />
+                          Editar
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
-
-            {loadError ? (
-              <div className="config-empty">{loadError}</div>
-            ) : contacts.length === 0 && !loading ? (
-              <div className="config-empty">Todavía no hay {directory.title.toLowerCase()} registrados.</div>
-            ) : (
-              <div className="timer-list-scroll">
-                {contacts.map((contact) => (
-                  <button
-                    key={contact.id}
-                    className={`timer-item ${form.id === contact.id ? "active" : ""}`}
-                    onClick={() => editContact(contact)}
-                  >
-                    <span>
-                      <strong>{contact.name}</strong>
-                      <small>{contact.phone}</small>
-                    </span>
-                    <em>{contact.active ? "Activo" : "Inactivo"}</em>
-                  </button>
-                ))}
-              </div>
-            )}
-          </section>
-
-          <form className="timer-form" onSubmit={saveContact}>
-            <div>
-              <p className="eyebrow">{editing ? `Editar ${directory.singular}` : `Nuevo ${directory.singular}`}</p>
-              <h3>{editing ? form.name || directory.singular : "Agregar contacto"}</h3>
-            </div>
-
-            <label>
-              Nombre
-              <input
-                value={form.name}
-                onChange={(event) => updateForm("name", event.target.value)}
-                placeholder={directory.namePlaceholder}
-              />
-            </label>
-
-            <label>
-              Teléfono WhatsApp
-              <input
-                value={form.phone}
-                onChange={(event) => updateForm("phone", event.target.value)}
-                placeholder="+51999999999"
-              />
-            </label>
-
-            <label>
-              Notas
-              <textarea
-                value={form.notes}
-                onChange={(event) => updateForm("notes", event.target.value)}
-                placeholder={directory.notesPlaceholder}
-              />
-            </label>
-
-            <label className="switch-line timer-active">
-              <input
-                type="checkbox"
-                checked={form.active}
-                onChange={(event) => updateForm("active", event.target.checked)}
-              />
-              <span>{directory.activeLabel}</span>
-            </label>
-
-            <div className="timer-form-actions">
-              <button type="button" className="secondary-action" onClick={resetForm}>
-                Limpiar
-              </button>
-              <button className="primary-action compact" disabled={saving || !form.name.trim() || !form.phone.trim()}>
-                <ShieldCheck size={17} />
-                {saving ? "Guardando..." : "Guardar"}
-              </button>
-            </div>
-          </form>
-        </div>
+          )}
+        </section>
       </section>
+
+      {formModalOpen && (
+        <div className="modal-backdrop" onClick={closeFormModal}>
+          <section
+            className="contact-form-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="contact-form-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="config-header">
+              <div>
+                <p className="eyebrow">{editing ? `Editar ${directory.singular}` : `Nuevo ${directory.singular}`}</p>
+                <h2 id="contact-form-title">{editing ? form.name || directory.singular : "Agregar contacto"}</h2>
+                <p>Completa los datos del contacto autorizado.</p>
+              </div>
+              <button className="icon-button" type="button" onClick={closeFormModal} aria-label="Cerrar">
+                <X size={18} />
+              </button>
+            </header>
+
+            <form className="timer-form" onSubmit={saveContact}>
+              <label>
+                Nombre
+                <input
+                  autoFocus
+                  value={form.name}
+                  onChange={(event) => updateForm("name", event.target.value)}
+                  placeholder={directory.namePlaceholder}
+                />
+              </label>
+
+              <label>
+                Teléfono WhatsApp
+                <input
+                  value={form.phone}
+                  onChange={(event) => updateForm("phone", event.target.value)}
+                  placeholder="+51999999999"
+                />
+              </label>
+
+              <label>
+                Notas
+                <textarea
+                  value={form.notes}
+                  onChange={(event) => updateForm("notes", event.target.value)}
+                  placeholder={directory.notesPlaceholder}
+                />
+              </label>
+
+              <label className="switch-line timer-active">
+                <input
+                  type="checkbox"
+                  checked={form.active}
+                  onChange={(event) => updateForm("active", event.target.checked)}
+                />
+                <span>{directory.activeLabel}</span>
+              </label>
+
+              <div className="timer-form-actions">
+                <button type="button" className="secondary-action" onClick={closeFormModal}>
+                  Cancelar
+                </button>
+                <button className="primary-action compact" disabled={saving || !form.name.trim() || !form.phone.trim()}>
+                  <ShieldCheck size={17} />
+                  {saving ? "Guardando..." : "Guardar"}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
     </main>
   );
 }
