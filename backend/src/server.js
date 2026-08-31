@@ -4,6 +4,8 @@ const config = require("./config");
 const webhookRouter = require("./routes/webhook");
 const conversationsRouter = require("./routes/conversations");
 const timersRouter = require("./routes/timers");
+const photographersRouter = require("./routes/photographers");
+const organizersRouter = require("./routes/organizers");
 const actionsRouter = require("./routes/actions");
 const settingsRouter = require("./routes/settings");
 const notificationsRouter = require("./routes/notifications");
@@ -41,6 +43,8 @@ app.get("/health/db", async (_req, res) => {
 app.use("/api/webhook", webhookRouter);
 app.use("/api/conversations", requireFirebaseAuth, conversationsRouter);
 app.use("/api/timers", requireFirebaseAuth, timersRouter);
+app.use("/api/photographers", requireFirebaseAuth, photographersRouter);
+app.use("/api/organizers", requireFirebaseAuth, organizersRouter);
 app.use("/api/actions", requireFirebaseAuth, actionsRouter);
 app.use("/api/settings", requireFirebaseAuth, settingsRouter);
 app.use("/api/notifications", requireFirebaseAuth, notificationsRouter);

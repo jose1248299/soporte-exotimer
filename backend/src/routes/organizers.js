@@ -1,3 +1,3 @@
 const createContactDirectoryRouter = require("./contactDirectory");
 
-module.exports = createContactDirectoryRouter("timerContact");
+module.exports = createContactDirectoryRouter("organizerContact");

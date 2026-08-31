@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   Bell,
   Bot,
+  Camera,
   ClipboardCheck,
   Eye,
   Filter,
@@ -18,6 +19,7 @@ import {
   ShieldCheck,
   UserCog,
   UserRound,
+  UsersRound,
   Zap,
 } from "lucide-react";
 import {
@@ -39,6 +41,36 @@ const USER_LABELS = {
 };
 
 const USER_TYPES = ["SYSTEM_USER", "TIMER", "ORGANIZER", "ATHLETE", "BUYER", "UNKNOWN"];
+
+const CONTACT_DIRECTORIES = {
+  timers: {
+    title: "Timers",
+    singular: "Timer",
+    endpoint: "/api/timers",
+    description: "Registra los números que se identificarán automáticamente como Timer.",
+    namePlaceholder: "Timer Norte",
+    notesPlaceholder: "Zona, empresa o eventos que suele operar",
+    activeLabel: "Timer activo",
+  },
+  photographers: {
+    title: "Fotógrafos",
+    singular: "Fotógrafo",
+    endpoint: "/api/photographers",
+    description: "Administra los contactos de fotógrafos autorizados.",
+    namePlaceholder: "Fotografía Meta",
+    notesPlaceholder: "Empresa, zona o eventos que suele cubrir",
+    activeLabel: "Fotógrafo activo",
+  },
+  organizers: {
+    title: "Organizadores",
+    singular: "Organizador",
+    endpoint: "/api/organizers",
+    description: "Administra los contactos de organizadores autorizados.",
+    namePlaceholder: "Lima Runners",
+    notesPlaceholder: "Empresa y eventos que organiza",
+    activeLabel: "Organizador activo",
+  },
+};
 
 function urlBase64ToUint8Array(base64String) {
   const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
@@ -721,7 +753,7 @@ function AiActionsModal({ open, onClose, conversation, actions = [] }) {
   );
 }
 
-const EMPTY_TIMER_FORM = {
+const EMPTY_CONTACT_FORM = {
   id: null,
   name: "",
   phone: "",
@@ -729,33 +761,33 @@ const EMPTY_TIMER_FORM = {
   notes: "",
 };
 
-function TimersModal({ open, onClose }) {
+function ContactDirectoryPage({ directory, onClose }) {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [timers, setTimers] = useState([]);
-  const [form, setForm] = useState(EMPTY_TIMER_FORM);
+  const [contacts, setContacts] = useState([]);
+  const [form, setForm] = useState(EMPTY_CONTACT_FORM);
   const [loadError, setLoadError] = useState("");
 
   const editing = Boolean(form.id);
 
   useEffect(() => {
-    if (!open) return;
     let canceled = false;
     setLoading(true);
     setLoadError("");
+    setForm(EMPTY_CONTACT_FORM);
 
-    apiFetch("/api/timers", { timeoutMs: 10000 })
+    apiFetch(directory.endpoint, { timeoutMs: 10000 })
       .then((res) => {
-        if (!res.ok) throw new Error("No se pudo cargar timers");
+        if (!res.ok) throw new Error(`No se pudo cargar ${directory.title}`);
         return res.json();
       })
       .then((data) => {
-        if (!canceled) setTimers(Array.isArray(data) ? data : []);
+        if (!canceled) setContacts(Array.isArray(data) ? data : []);
       })
       .catch(() => {
         if (!canceled) {
-          setTimers([]);
-          setLoadError("No se pudo cargar la lista de Timers.");
+          setContacts([]);
+          setLoadError(`No se pudo cargar la lista de ${directory.title}.`);
         }
       })
       .finally(() => {
@@ -765,27 +797,27 @@ function TimersModal({ open, onClose }) {
     return () => {
       canceled = true;
     };
-  }, [open]);
+  }, [directory]);
 
   function updateForm(field, value) {
     setForm((current) => ({ ...current, [field]: value }));
   }
 
-  function editTimer(timer) {
+  function editContact(contact) {
     setForm({
-      id: timer.id,
-      name: timer.name || "",
-      phone: timer.phone || "",
-      active: Boolean(timer.active),
-      notes: timer.notes || "",
+      id: contact.id,
+      name: contact.name || "",
+      phone: contact.phone || "",
+      active: Boolean(contact.active),
+      notes: contact.notes || "",
     });
   }
 
   function resetForm() {
-    setForm(EMPTY_TIMER_FORM);
+    setForm(EMPTY_CONTACT_FORM);
   }
 
-  async function saveTimer(event) {
+  async function saveContact(event) {
     event.preventDefault();
     if (!form.name.trim() || !form.phone.trim()) return;
 
@@ -797,48 +829,59 @@ function TimersModal({ open, onClose }) {
         active: Boolean(form.active),
         notes: form.notes.trim() || null,
       };
-      const res = await apiFetch(editing ? `/api/timers/${form.id}` : "/api/timers", {
+      const res = await apiFetch(editing ? `${directory.endpoint}/${form.id}` : directory.endpoint, {
         method: editing ? "PATCH" : "POST",
         body: JSON.stringify(payload),
         timeoutMs: 10000,
       });
-      if (!res.ok) throw new Error("No se pudo guardar Timer");
+      if (!res.ok) throw new Error(`No se pudo guardar ${directory.singular}`);
       const saved = await res.json();
-      setTimers((current) => {
-        const exists = current.some((timer) => timer.id === saved.id);
+      setContacts((current) => {
+        const exists = current.some((contact) => contact.id === saved.id);
         const next = exists
-          ? current.map((timer) => (timer.id === saved.id ? saved : timer))
+          ? current.map((contact) => (contact.id === saved.id ? saved : contact))
           : [...current, saved];
         return next.sort((a, b) => String(a.name).localeCompare(String(b.name)));
       });
       resetForm();
     } catch {
-      alert("No se pudo guardar el Timer.");
+      alert(`No se pudo guardar el ${directory.singular}.`);
     } finally {
       setSaving(false);
     }
   }
 
-  if (!open) return null;
-
   return (
-    <div className="modal-backdrop" role="dialog" aria-modal="true">
-      <section className="config-modal timers-modal">
+    <main className="directory-page-shell">
+      <header className="topbar directory-topbar">
+        <div className="topbar-title">
+          <div className="brand-mark small">
+            <Headphones size={20} />
+          </div>
+          <div>
+            <p className="eyebrow">Finisher Data</p>
+            <h1>{directory.title}</h1>
+          </div>
+        </div>
+        <button className="secondary-action" type="button" onClick={onClose}>
+          <span className="desktop-only">Cerrar ventana</span>
+          <span className="mobile-only">Cerrar</span>
+        </button>
+      </header>
+
+      <section className="directory-panel">
         <header className="config-header">
           <div>
-            <p className="eyebrow">Timers</p>
+            <p className="eyebrow">{directory.title}</p>
             <h2>Usuarios autorizados</h2>
-            <p>Registra los numeros que se identificaran automaticamente como Timer.</p>
+            <p>{directory.description}</p>
           </div>
-          <button className="icon-button" onClick={onClose} title="Cerrar">
-            <ArrowLeft size={18} />
-          </button>
         </header>
 
         <div className="timers-body">
-          <section className="timer-list" aria-label="Timers registrados">
+          <section className="timer-list" aria-label={`${directory.title} registrados`}>
             <div className="timer-list-header">
-              <strong>{loading ? "Cargando..." : `${timers.length} Timers`}</strong>
+              <strong>{loading ? "Cargando..." : `${contacts.length} ${directory.title}`}</strong>
               <button type="button" onClick={resetForm}>
                 Nuevo
               </button>
@@ -846,31 +889,31 @@ function TimersModal({ open, onClose }) {
 
             {loadError ? (
               <div className="config-empty">{loadError}</div>
-            ) : timers.length === 0 && !loading ? (
-              <div className="config-empty">Todavia no hay Timers registrados.</div>
+            ) : contacts.length === 0 && !loading ? (
+              <div className="config-empty">Todavía no hay {directory.title.toLowerCase()} registrados.</div>
             ) : (
               <div className="timer-list-scroll">
-                {timers.map((timer) => (
+                {contacts.map((contact) => (
                   <button
-                    key={timer.id}
-                    className={`timer-item ${form.id === timer.id ? "active" : ""}`}
-                    onClick={() => editTimer(timer)}
+                    key={contact.id}
+                    className={`timer-item ${form.id === contact.id ? "active" : ""}`}
+                    onClick={() => editContact(contact)}
                   >
                     <span>
-                      <strong>{timer.name}</strong>
-                      <small>{timer.phone}</small>
+                      <strong>{contact.name}</strong>
+                      <small>{contact.phone}</small>
                     </span>
-                    <em>{timer.active ? "Activo" : "Inactivo"}</em>
+                    <em>{contact.active ? "Activo" : "Inactivo"}</em>
                   </button>
                 ))}
               </div>
             )}
           </section>
 
-          <form className="timer-form" onSubmit={saveTimer}>
+          <form className="timer-form" onSubmit={saveContact}>
             <div>
-              <p className="eyebrow">{editing ? "Editar Timer" : "Nuevo Timer"}</p>
-              <h3>{editing ? form.name || "Timer" : "Agregar contacto"}</h3>
+              <p className="eyebrow">{editing ? `Editar ${directory.singular}` : `Nuevo ${directory.singular}`}</p>
+              <h3>{editing ? form.name || directory.singular : "Agregar contacto"}</h3>
             </div>
 
             <label>
@@ -878,12 +921,12 @@ function TimersModal({ open, onClose }) {
               <input
                 value={form.name}
                 onChange={(event) => updateForm("name", event.target.value)}
-                placeholder="Timer Norte"
+                placeholder={directory.namePlaceholder}
               />
             </label>
 
             <label>
-              Telefono WhatsApp
+              Teléfono WhatsApp
               <input
                 value={form.phone}
                 onChange={(event) => updateForm("phone", event.target.value)}
@@ -896,7 +939,7 @@ function TimersModal({ open, onClose }) {
               <textarea
                 value={form.notes}
                 onChange={(event) => updateForm("notes", event.target.value)}
-                placeholder="Zona, empresa o eventos que suele operar"
+                placeholder={directory.notesPlaceholder}
               />
             </label>
 
@@ -906,7 +949,7 @@ function TimersModal({ open, onClose }) {
                 checked={form.active}
                 onChange={(event) => updateForm("active", event.target.checked)}
               />
-              <span>Timer activo</span>
+              <span>{directory.activeLabel}</span>
             </label>
 
             <div className="timer-form-actions">
@@ -921,7 +964,7 @@ function TimersModal({ open, onClose }) {
           </form>
         </div>
       </section>
-    </div>
+    </main>
   );
 }
 
@@ -940,7 +983,6 @@ function SupportApp({ onBack }) {
   const [listError, setListError] = useState("");
   const [pendingActions, setPendingActions] = useState([]);
   const [configOpen, setConfigOpen] = useState(false);
-  const [timersOpen, setTimersOpen] = useState(false);
   const [actionsModalOpen, setActionsModalOpen] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [pushStatus, setPushStatus] = useState(() => {
@@ -1264,6 +1306,14 @@ function SupportApp({ onBack }) {
     }
   }
 
+  function openContactDirectory(directoryKey) {
+    const url = new URL(window.location.href);
+    url.search = "";
+    url.hash = "";
+    url.searchParams.set("directory", directoryKey);
+    window.open(url.toString(), "_blank", "noopener,noreferrer");
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -1295,9 +1345,17 @@ function SupportApp({ onBack }) {
             <Bell size={15} />
             {pushStatus === "enabled" ? "Push" : pushStatus === "loading" ? "Activando" : "Notificar"}
           </button>
-          <button className="status-chip config-trigger" onClick={() => setTimersOpen(true)}>
+          <button className="status-chip config-trigger" onClick={() => openContactDirectory("timers")}>
             <UserCog size={15} />
             Timers
+          </button>
+          <button className="status-chip config-trigger" onClick={() => openContactDirectory("photographers")}>
+            <Camera size={15} />
+            Fotógrafos
+          </button>
+          <button className="status-chip config-trigger" onClick={() => openContactDirectory("organizers")}>
+            <UsersRound size={15} />
+            Organizadores
           </button>
           <button className="status-chip config-trigger" onClick={() => setConfigOpen(true)}>
             <Settings size={15} />
@@ -1506,7 +1564,6 @@ function SupportApp({ onBack }) {
         </section>
       </section>
 
-      <TimersModal open={timersOpen} onClose={() => setTimersOpen(false)} />
       <ConfigurationModal open={configOpen} onClose={() => setConfigOpen(false)} />
       <AiActionsModal
         open={actionsModalOpen}
@@ -1562,6 +1619,8 @@ function SupportApp({ onBack }) {
 function App() {
   const [user, setUser] = useState(null);
   const [checkingAuth, setCheckingAuth] = useState(true);
+  const directoryKey = new URLSearchParams(window.location.search).get("directory");
+  const directory = CONTACT_DIRECTORIES[directoryKey];
 
   useEffect(() => {
     setAuthTokenProvider(async () => {
@@ -1589,7 +1648,11 @@ function App() {
   }
 
   return user ? (
-    <SupportApp onBack={() => signOut(auth)} />
+    directory ? (
+      <ContactDirectoryPage directory={directory} onClose={() => window.close()} />
+    ) : (
+      <SupportApp onBack={() => signOut(auth)} />
+    )
   ) : (
     <LoginScreen />
   );

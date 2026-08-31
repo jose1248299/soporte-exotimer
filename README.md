@@ -55,6 +55,10 @@ npm run dev
 - `POST /api/webhook`: recepcion de mensajes de WhatsApp.
 - `GET /api/timers`: lista de Timers autorizados.
 - `POST /api/timers`: crea o actualiza un Timer por telefono.
+- `GET /api/photographers`: lista de fotografos autorizados.
+- `POST /api/photographers`: crea o actualiza un fotografo por telefono.
+- `GET /api/organizers`: lista de organizadores autorizados.
+- `POST /api/organizers`: crea o actualiza un organizador por telefono.
 - `GET /api/conversations`: lista conversaciones.
 - `GET /api/conversations/:id`: detalle de conversacion, mensajes y acciones.
 - `GET /api/actions?status=PROPOSED`: lista acciones propuestas por IA pendientes de confirmacion.

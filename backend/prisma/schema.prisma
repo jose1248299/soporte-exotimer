@@ -64,6 +64,30 @@ model TimerContact {
   @@index([phone])
 }
 
+model PhotographerContact {
+  id        Int      @id @default(autoincrement())
+  name      String
+  phone     String   @unique
+  active    Boolean  @default(true)
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([phone])
+}
+
+model OrganizerContact {
+  id        Int      @id @default(autoincrement())
+  name      String
+  phone     String   @unique
+  active    Boolean  @default(true)
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([phone])
+}
+
 model Conversation {
   id             Int                @id @default(autoincrement())
   channel        MessageChannel     @default(WHATSAPP)
