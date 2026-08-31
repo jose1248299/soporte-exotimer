@@ -761,7 +761,7 @@ const EMPTY_CONTACT_FORM = {
   notes: "",
 };
 
-function ContactDirectoryPage({ directory, onClose }) {
+function ContactDirectoryPage({ directory, onBack }) {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [contacts, setContacts] = useState([]);
@@ -863,9 +863,10 @@ function ContactDirectoryPage({ directory, onClose }) {
             <h1>{directory.title}</h1>
           </div>
         </div>
-        <button className="secondary-action" type="button" onClick={onClose}>
-          <span className="desktop-only">Cerrar ventana</span>
-          <span className="mobile-only">Cerrar</span>
+        <button className="secondary-action" type="button" onClick={onBack}>
+          <ArrowLeft size={17} />
+          <span className="desktop-only">Volver al centro de soporte</span>
+          <span className="mobile-only">Volver</span>
         </button>
       </header>
 
@@ -968,7 +969,7 @@ function ContactDirectoryPage({ directory, onClose }) {
   );
 }
 
-function SupportApp({ onBack }) {
+function SupportApp({ onBack, onOpenDirectory }) {
   const [conversations, setConversations] = useState([]);
   const [selected, setSelected] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -1306,14 +1307,6 @@ function SupportApp({ onBack }) {
     }
   }
 
-  function openContactDirectory(directoryKey) {
-    const url = new URL(window.location.href);
-    url.search = "";
-    url.hash = "";
-    url.searchParams.set("directory", directoryKey);
-    window.open(url.toString(), "_blank", "noopener,noreferrer");
-  }
-
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -1345,15 +1338,15 @@ function SupportApp({ onBack }) {
             <Bell size={15} />
             {pushStatus === "enabled" ? "Push" : pushStatus === "loading" ? "Activando" : "Notificar"}
           </button>
-          <button className="status-chip config-trigger" onClick={() => openContactDirectory("timers")}>
+          <button className="status-chip config-trigger" onClick={() => onOpenDirectory("timers")}>
             <UserCog size={15} />
             Timers
           </button>
-          <button className="status-chip config-trigger" onClick={() => openContactDirectory("photographers")}>
+          <button className="status-chip config-trigger" onClick={() => onOpenDirectory("photographers")}>
             <Camera size={15} />
             Fotógrafos
           </button>
-          <button className="status-chip config-trigger" onClick={() => openContactDirectory("organizers")}>
+          <button className="status-chip config-trigger" onClick={() => onOpenDirectory("organizers")}>
             <UsersRound size={15} />
             Organizadores
           </button>
@@ -1619,7 +1612,9 @@ function SupportApp({ onBack }) {
 function App() {
   const [user, setUser] = useState(null);
   const [checkingAuth, setCheckingAuth] = useState(true);
-  const directoryKey = new URLSearchParams(window.location.search).get("directory");
+  const [directoryKey, setDirectoryKey] = useState(
+    () => new URLSearchParams(window.location.search).get("directory")
+  );
   const directory = CONTACT_DIRECTORIES[directoryKey];
 
   useEffect(() => {
@@ -1633,6 +1628,26 @@ function App() {
       setCheckingAuth(false);
     });
   }, []);
+
+  useEffect(() => {
+    function handlePopState() {
+      setDirectoryKey(new URLSearchParams(window.location.search).get("directory"));
+    }
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  function navigateToDirectory(nextDirectoryKey) {
+    const url = new URL(window.location.href);
+    if (nextDirectoryKey) {
+      url.searchParams.set("directory", nextDirectoryKey);
+    } else {
+      url.searchParams.delete("directory");
+    }
+    window.history.pushState({}, "", `${url.pathname}${url.search}${url.hash}`);
+    setDirectoryKey(nextDirectoryKey || null);
+  }
 
   if (checkingAuth) {
     return (
@@ -1649,9 +1664,12 @@ function App() {
 
   return user ? (
     directory ? (
-      <ContactDirectoryPage directory={directory} onClose={() => window.close()} />
+      <ContactDirectoryPage directory={directory} onBack={() => navigateToDirectory(null)} />
     ) : (
-      <SupportApp onBack={() => signOut(auth)} />
+      <SupportApp
+        onBack={() => signOut(auth)}
+        onOpenDirectory={navigateToDirectory}
+      />
     )
   ) : (
     <LoginScreen />
