@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { createRoot } from "react-dom/client";
 import {
   ArrowLeft,
-  Bell,
   Bot,
   Camera,
   ClipboardCheck,
@@ -74,17 +73,6 @@ const CONTACT_DIRECTORIES = {
     activeLabel: "Organizador activo",
   },
 };
-
-function urlBase64ToUint8Array(base64String) {
-  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
-  const base64 = `${base64String}${padding}`.replace(/-/g, "+").replace(/_/g, "/");
-  const rawData = window.atob(base64);
-  return Uint8Array.from([...rawData].map((char) => char.charCodeAt(0)));
-}
-
-function supportsPushNotifications() {
-  return "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
-}
 
 function isMobileLayout() {
   return typeof window !== "undefined" && window.matchMedia("(max-width: 860px)").matches;
@@ -764,7 +752,68 @@ const EMPTY_CONTACT_FORM = {
   notes: "",
 };
 
-function ContactDirectoryPage({ directory, onBack }) {
+function TopNavigation({ title, activeSection, onOpenMessages, onOpenDirectory, onOpenConfig, onSignOut, compact = false }) {
+  return (
+    <header className={`topbar ${compact ? "directory-topbar" : ""}`}>
+      <div className="topbar-title">
+        <div className="brand-mark small">
+          <Headphones size={20} />
+        </div>
+        <div>
+          <p className="eyebrow">Finisher Data</p>
+          <h1>{title}</h1>
+        </div>
+      </div>
+      <nav className="topbar-actions" aria-label="Navegación principal">
+        <button
+          className={`status-chip config-trigger nav-trigger ${activeSection === "messages" ? "active" : ""}`}
+          type="button"
+          onClick={onOpenMessages}
+        >
+          <MessageCircle size={15} />
+          Mensajes
+        </button>
+        <button
+          className={`status-chip config-trigger nav-trigger ${activeSection === "timers" ? "active" : ""}`}
+          type="button"
+          onClick={() => onOpenDirectory("timers")}
+        >
+          <UserCog size={15} />
+          Timers
+        </button>
+        <button
+          className={`status-chip config-trigger nav-trigger ${activeSection === "photographers" ? "active" : ""}`}
+          type="button"
+          onClick={() => onOpenDirectory("photographers")}
+        >
+          <Camera size={15} />
+          Fotógrafos
+        </button>
+        <button
+          className={`status-chip config-trigger nav-trigger ${activeSection === "organizers" ? "active" : ""}`}
+          type="button"
+          onClick={() => onOpenDirectory("organizers")}
+        >
+          <UsersRound size={15} />
+          Organizadores
+        </button>
+        <button
+          className={`status-chip config-trigger nav-trigger ${activeSection === "configuration" ? "active" : ""}`}
+          type="button"
+          onClick={onOpenConfig}
+        >
+          <Settings size={15} />
+          Configuracion
+        </button>
+        <button className="secondary-action" type="button" onClick={onSignOut}>
+          Salir
+        </button>
+      </nav>
+    </header>
+  );
+}
+
+function ContactDirectoryPage({ directory, directoryKey, onOpenMessages, onOpenDirectory, onOpenConfig, onSignOut }) {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [contacts, setContacts] = useState([]);
@@ -867,22 +916,15 @@ function ContactDirectoryPage({ directory, onBack }) {
 
   return (
     <main className="directory-page-shell">
-      <header className="topbar directory-topbar">
-        <div className="topbar-title">
-          <div className="brand-mark small">
-            <Headphones size={20} />
-          </div>
-          <div>
-            <p className="eyebrow">Finisher Data</p>
-            <h1>{directory.title}</h1>
-          </div>
-        </div>
-        <button className="secondary-action" type="button" onClick={onBack}>
-          <ArrowLeft size={17} />
-          <span className="desktop-only">Volver al centro de soporte</span>
-          <span className="mobile-only">Volver</span>
-        </button>
-      </header>
+      <TopNavigation
+        title={directory.title}
+        activeSection={directoryKey}
+        onOpenMessages={onOpenMessages}
+        onOpenDirectory={onOpenDirectory}
+        onOpenConfig={onOpenConfig}
+        onSignOut={onSignOut}
+        compact
+      />
 
       <section className="directory-panel">
         <header className="config-header">
@@ -1019,7 +1061,7 @@ function ContactDirectoryPage({ directory, onBack }) {
   );
 }
 
-function SupportApp({ onBack, onOpenDirectory }) {
+function SupportApp({ onOpenMessages, onOpenDirectory, onOpenConfig, onSignOut }) {
   const [conversations, setConversations] = useState([]);
   const [selected, setSelected] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -1033,13 +1075,8 @@ function SupportApp({ onBack, onOpenDirectory }) {
   const [usingDemo, setUsingDemo] = useState(true);
   const [listError, setListError] = useState("");
   const [pendingActions, setPendingActions] = useState([]);
-  const [configOpen, setConfigOpen] = useState(false);
   const [actionsModalOpen, setActionsModalOpen] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const [pushStatus, setPushStatus] = useState(() => {
-    if (!supportsPushNotifications()) return "unsupported";
-    return Notification.permission === "granted" ? "enabled" : "default";
-  });
   const [previewImage, setPreviewImage] = useState(null);
   const listLoaded = useRef(false);
   const chatRef = useRef(null);
@@ -1312,103 +1349,16 @@ function SupportApp({ onBack, onOpenDirectory }) {
     }
   }
 
-  async function enablePushNotifications() {
-    if (!supportsPushNotifications()) {
-      setPushStatus("unsupported");
-      return;
-    }
-
-    setPushStatus("loading");
-    try {
-      const permission = await Notification.requestPermission();
-      if (permission !== "granted") {
-        setPushStatus(permission === "denied" ? "denied" : "default");
-        return;
-      }
-
-      const keyResponse = await apiFetch("/api/notifications/public-key", { timeoutMs: 10000 });
-      if (!keyResponse.ok) throw new Error("No se pudo cargar clave push");
-      const keyData = await keyResponse.json();
-      if (!keyData.configured || !keyData.publicKey) throw new Error("Push no configurado en backend");
-
-      const registration = await navigator.serviceWorker.ready;
-      const existing = await registration.pushManager.getSubscription();
-      const subscription =
-        existing ||
-        (await registration.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: urlBase64ToUint8Array(keyData.publicKey),
-        }));
-
-      const saveResponse = await apiFetch("/api/notifications/subscriptions", {
-        method: "POST",
-        body: JSON.stringify({ subscription }),
-        timeoutMs: 10000,
-      });
-      if (!saveResponse.ok) throw new Error("No se pudo guardar suscripcion push");
-
-      setPushStatus("enabled");
-      if ("clearAppBadge" in navigator) {
-        navigator.clearAppBadge().catch(() => {});
-      }
-    } catch (error) {
-      console.warn("No se pudieron activar notificaciones:", error);
-      setPushStatus("error");
-    }
-  }
-
   return (
     <main className="app-shell">
-      <header className="topbar">
-        <div className="topbar-title">
-          <button className="icon-button mobile-only" onClick={onBack} title="Volver">
-            <ArrowLeft size={19} />
-          </button>
-          <div className="brand-mark small">
-            <Headphones size={20} />
-          </div>
-          <div>
-            <p className="eyebrow">Finisher Data</p>
-            <h1>Centro de soporte</h1>
-          </div>
-        </div>
-        <div className="topbar-actions">
-          <button
-            className={`status-chip config-trigger notification-trigger ${pushStatus === "enabled" ? "active" : ""}`}
-            onClick={enablePushNotifications}
-            disabled={pushStatus === "loading" || pushStatus === "unsupported"}
-            title={
-              pushStatus === "unsupported"
-                ? "Este navegador no soporta notificaciones push"
-                : pushStatus === "enabled"
-                  ? "Notificaciones activas"
-                  : "Activar notificaciones"
-            }
-          >
-            <Bell size={15} />
-            {pushStatus === "enabled" ? "Push" : pushStatus === "loading" ? "Activando" : "Notificar"}
-          </button>
-          <button className="status-chip config-trigger" onClick={() => onOpenDirectory("timers")}>
-            <UserCog size={15} />
-            Timers
-          </button>
-          <button className="status-chip config-trigger" onClick={() => onOpenDirectory("photographers")}>
-            <Camera size={15} />
-            Fotógrafos
-          </button>
-          <button className="status-chip config-trigger" onClick={() => onOpenDirectory("organizers")}>
-            <UsersRound size={15} />
-            Organizadores
-          </button>
-          <button className="status-chip config-trigger" onClick={() => setConfigOpen(true)}>
-            <Settings size={15} />
-            Configuracion
-          </button>
-          <button className="secondary-action desktop-only" onClick={onBack}>
-            Salir
-          </button>
-        </div>
-      </header>
+      <TopNavigation
+        title="Centro de soporte"
+        activeSection="messages"
+        onOpenMessages={onOpenMessages}
+        onOpenDirectory={onOpenDirectory}
+        onOpenConfig={onOpenConfig}
+        onSignOut={onSignOut}
+      />
 
       {pendingActions.length > 0 && (
         <section className="actions-strip" aria-label="Acciones pendientes">
@@ -1607,7 +1557,6 @@ function SupportApp({ onBack, onOpenDirectory }) {
         </section>
       </section>
 
-      <ConfigurationModal open={configOpen} onClose={() => setConfigOpen(false)} />
       <AiActionsModal
         open={actionsModalOpen}
         onClose={() => setActionsModalOpen(false)}
@@ -1665,6 +1614,7 @@ function App() {
   const [directoryKey, setDirectoryKey] = useState(
     () => new URLSearchParams(window.location.search).get("directory")
   );
+  const [configOpen, setConfigOpen] = useState(false);
   const directory = CONTACT_DIRECTORIES[directoryKey];
 
   useEffect(() => {
@@ -1713,14 +1663,26 @@ function App() {
   }
 
   return user ? (
-    directory ? (
-      <ContactDirectoryPage directory={directory} onBack={() => navigateToDirectory(null)} />
-    ) : (
-      <SupportApp
-        onBack={() => signOut(auth)}
-        onOpenDirectory={navigateToDirectory}
-      />
-    )
+    <>
+      {directory ? (
+        <ContactDirectoryPage
+          directory={directory}
+          directoryKey={directoryKey}
+          onOpenMessages={() => navigateToDirectory(null)}
+          onOpenDirectory={navigateToDirectory}
+          onOpenConfig={() => setConfigOpen(true)}
+          onSignOut={() => signOut(auth)}
+        />
+      ) : (
+        <SupportApp
+          onOpenMessages={() => navigateToDirectory(null)}
+          onOpenDirectory={navigateToDirectory}
+          onOpenConfig={() => setConfigOpen(true)}
+          onSignOut={() => signOut(auth)}
+        />
+      )}
+      <ConfigurationModal open={configOpen} onClose={() => setConfigOpen(false)} />
+    </>
   ) : (
     <LoginScreen />
   );

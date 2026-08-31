@@ -182,7 +182,7 @@ button {
   background: #e1ece8;
 }
 
-.notification-trigger.active {
+.nav-trigger.active {
   color: #0f604f;
   background: #dff7ed;
 }
@@ -1714,8 +1714,8 @@ button {
   }
 
   .topbar.directory-topbar {
-    align-items: center;
-    flex-direction: row;
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .topbar {
