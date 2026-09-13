@@ -15,6 +15,7 @@ const { findOrCreateSupportCase, pickCompetitionId } = require("./supportCases")
 const { downloadMedia, sendTextMessage } = require("./waba");
 const { normalizeDorsalReferences } = require("../utils/dorsal");
 const { isVideoFinishEvidence } = require("../utils/videoFinish");
+const { canonicalizeResultInput, compactAction, applyAthleteReviewPolicy, requestedChangeAlreadySatisfied } = require("./athleteReview");
 const { normalizePhone } = require("../utils/phone");
 const {
   isWhatsappUserId,
@@ -24,6 +25,7 @@ const {
 } = require("../utils/whatsapp");
 
 const replyDebounceTimers = new Map();
+const runningConversationReplies = new Map();
 const processorStartedAt = new Date();
 
 async function findOrCreateConversation({
@@ -187,7 +189,16 @@ function mergeActionInput(previousInput = {}, nextInput = {}) {
       previousInput[key] != null &&
       normalizeIdentity(nextInput[key]) !== normalizeIdentity(previousInput[key])
   );
-  const safePrevious = identityChanged
+  const previousCompetition = pickCompetitionId(previousInput);
+  const nextCompetition = pickCompetitionId(nextInput);
+  const competitionChanged = previousCompetition && nextCompetition && String(previousCompetition) !== String(nextCompetition);
+  const previousDorsal = normalizeDorsalValue(previousInput.dorsal || previousInput.bib);
+  const nextDorsal = normalizeDorsalValue(nextInput.dorsal || nextInput.bib);
+  const resultChanged = previousDorsal && nextDorsal && previousDorsal !== nextDorsal &&
+    nextDorsal !== normalizeDorsalValue(previousInput.newDorsal);
+  const safePrevious = competitionChanged ? {} : resultChanged
+    ? Object.fromEntries(Object.entries(previousInput).filter(([key]) => ["competitionId", "competition_id", "competitionName", "eventDate"].includes(key)))
+    : identityChanged
     ? Object.fromEntries(
         Object.entries(previousInput).filter(
           ([key]) => !identityKeys.includes(key)
@@ -1087,6 +1098,15 @@ async function inspectAthleteResultPreflight({
     currentOfficialTime: summary.officialTime || null,
     currentState: summary.state,
   };
+  const claimText = String([text, input.requestedCorrection, input.targetField, classification.intent].filter(Boolean).join(" "))
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  const claimsIncorrectTime = /modificar.{0,40}tiempo|tiempo.{0,40}(incorrect|error|difer|menor)|corregir.{0,30}tiempo/.test(claimText) ||
+    Boolean(input.gpsElapsedTime || input.evidenceElapsedTime || normalizeDuration(input.requestedValue));
+  // A published time answers "missing result", not "this time is wrong".
+  if (resultHasPublishedTime(detail) && claimsIncorrectTime) {
+    return { classification: { ...classification, action: null, needsHuman: false, actionInput: enrichedInput },
+      audit: enrichedAudit, resolution: null, promoted: false };
+  }
 
   if (
     shouldPromoteTrustedTimeCorrection(
@@ -1287,15 +1307,20 @@ async function findPendingInboundMessages(conversationId) {
   return pending;
 }
 
-function scheduleConversationProcessing(conversationId) {
+function scheduleConversationProcessing(conversationId, retry = 0) {
   const previous = replyDebounceTimers.get(conversationId);
   if (previous) clearTimeout(previous);
 
-  const waitMs = Math.max(0, Number(config.support.replyDebounceMs || 8000));
+  const waitMs = retry ? Math.min(120000, 30000 * retry) : Math.max(0, Number(config.support.replyDebounceMs || 8000));
   const timer = setTimeout(() => {
     replyDebounceTimers.delete(conversationId);
+    if (runningConversationReplies.has(conversationId)) {
+      scheduleConversationProcessing(conversationId, retry);
+      return;
+    }
     processConversationReply(conversationId).catch((error) => {
-      console.error(`Error procesando conversacion ${conversationId} tras debounce:`, error);
+      console.error(`Error procesando conversacion ${conversationId} tras debounce:`, error.message);
+      if (retry < 3) scheduleConversationProcessing(conversationId, retry + 1);
     });
   }, waitMs);
 
@@ -1310,7 +1335,27 @@ async function processInboundText(args) {
   });
 }
 
-async function processConversationReply(conversationId) {
+async function loadAthleteResultContext(input) {
+  const rows = input.resultId ? [] : await executeAction("ATHLETE", "EXOTIMER_GET_RESULTS", input, { allowByPolicy: true });
+  const resultId = input.resultId || (Array.isArray(rows) && rows.length === 1 ? rows[0].id : null);
+  const detail = resultId ? await executeAction("ATHLETE", "EXOTIMER_GET_RESULT_DETAIL", { resultId }, { allowByPolicy: true }) : null;
+  return {
+    checkedAt: new Date().toISOString(), competitionId: pickCompetitionId(input),
+    result: detail ? summarizeResultForClosure(detail) : null, matches: detail ? 1 : rows.length,
+    timing: detail ? { configs: detail.event?.configs?.map(c => ({ type_salidas: c.type_salidas, salidas: c.salidas })),
+      start_at: detail.event?.start_at, assignments: detail.raws_asigments } : null,
+  };
+}
+
+async function processConversationReply(conversationId, { replay = false, preview = false, sendReply = true } = {}) {
+  if (runningConversationReplies.has(conversationId)) return runningConversationReplies.get(conversationId);
+  const job = runConversationReply(conversationId, { replay, preview, sendReply })
+    .finally(() => runningConversationReplies.delete(conversationId));
+  runningConversationReplies.set(conversationId, job);
+  return job;
+}
+
+async function runConversationReply(conversationId, { replay, preview, sendReply }) {
   const conversation = await prisma.conversation.findUnique({
     where: { id: conversationId },
   });
@@ -1326,18 +1371,30 @@ async function processConversationReply(conversationId) {
       })
     : null;
 
-  const pendingInboundMessages = await findPendingInboundMessages(conversation.id);
+  const pendingInboundMessages = replay
+    ? await prisma.message.findMany({ where: { conversationId, direction: "INBOUND" }, orderBy: { timestamp: "desc" }, take: 1 })
+    : await findPendingInboundMessages(conversation.id);
   if (!pendingInboundMessages.length) return null;
 
   const recentMessages = await prisma.message.findMany({
     where: { conversationId: conversation.id },
     orderBy: { timestamp: "desc" },
-    take: 12,
+    take: 60,
   });
+  const actionHistory = (await prisma.supportAction.findMany({
+    where: { conversationId }, orderBy: { id: "desc" }, take: 30,
+  })).reverse().map(compactAction);
   const history = [...recentMessages].reverse().map(compactMessage);
   const triggerMessage = pendingInboundMessages[pendingInboundMessages.length - 1];
   const contextText = buildExotimerContextText(triggerMessage, conversation);
   const processableText = [contextText, buildCombinedProcessableText(pendingInboundMessages)].filter(Boolean).join("\n\n");
+  let resultContext = null;
+  const previousInput = canonicalizeResultInput(conversation.classification?.actionInput || {}, actionHistory);
+  if (conversation.userType === "ATHLETE" && pickCompetitionId(previousInput) &&
+      (previousInput.dorsal || previousInput.currentDorsal || previousInput.resultId) &&
+      !/INSCRIPTION|PAYMENT/.test(conversation.classification?.action || "")) {
+    resultContext = await loadAthleteResultContext(previousInput).catch(error => ({ error: error.message, verified: false }));
+  }
 
   let classification = await classifyMessage({
     text: processableText,
@@ -1348,6 +1405,8 @@ async function processConversationReply(conversationId) {
     history,
     channel: conversation.channel,
     trustedSystemUser,
+    actionHistory,
+    resultContext,
   });
   classification = mergeClassificationWithConversation(classification, conversation);
   if (trustedSystemUser) {
@@ -1375,7 +1434,30 @@ async function processConversationReply(conversationId) {
   const userType = trustedSystemUser ? "SYSTEM_USER" : timer ? "TIMER" : classification.userType;
   const contextResolution = await resolveCompetitionForAction(userType, classification);
   classification = contextResolution.classification;
+  classification.actionInput = canonicalizeResultInput(classification.actionInput, actionHistory, classification.action);
+  const athleteInput = classification.actionInput || {};
+  if (userType === "ATHLETE" && pickCompetitionId(athleteInput) &&
+      (athleteInput.resultId || athleteInput.dorsal || athleteInput.currentDorsal) &&
+      !(resultContext?.result && String(resultContext.competitionId) === String(pickCompetitionId(athleteInput)) &&
+        (String(resultContext.result.resultId) === String(athleteInput.resultId) || String(resultContext.result.dorsal) === String(athleteInput.dorsal || athleteInput.currentDorsal))) &&
+      !/INSCRIPTION|PAYMENT/.test(classification.action || "")) {
+    try {
+      resultContext = await loadAthleteResultContext(athleteInput);
+      if (!isVideoFinishEvidence(athleteInput)) {
+        const reviewed = await classifyMessage({ text: processableText, forcedTimer: false,
+          previousClassification: classification, previousUserType: userType, conversationStatus: conversation.status,
+          history, channel: conversation.channel, actionHistory, resultContext });
+        classification = mergeClassificationWithConversation(reviewed, { classification });
+        classification.actionInput = canonicalizeResultInput(classification.actionInput, actionHistory, classification.action);
+      }
+    } catch (error) {
+      resultContext = { error: error.message, verified: false };
+    }
+  }
 
+  if (!isVideoFinishEvidence(classification.actionInput)) {
+    classification = applyAthleteReviewPolicy(classification, resultContext, history, actionHistory);
+  }
   const missingFields = missingFieldsForAction(classification.action, classification.actionInput);
   if (missingFields.length) {
     classification = {
@@ -1408,15 +1490,27 @@ async function processConversationReply(conversationId) {
     };
   }
 
-  const supportCase = await findOrCreateSupportCase({
+  if (preview) return { conversationId, classification, resultContext, actionHistory, preview: true };
+
+  let supportCase = replay && triggerMessage.supportCaseId
+    ? await prisma.supportCase.findUnique({ where: { id: triggerMessage.supportCaseId } })
+    : null;
+  if (supportCase && pickCompetitionId(classification.actionInput) &&
+      String(supportCase.competitionId) !== String(pickCompetitionId(classification.actionInput))) {
+    throw new Error("El reproceso cambio de competencia; revisa el contexto antes de ejecutar.");
+  }
+  if (!supportCase) supportCase = await findOrCreateSupportCase({
     conversationId: conversation.id,
     userType,
     classification,
     timestamp: triggerMessage.timestamp,
   });
+  if (replay && supportCase) supportCase = await prisma.supportCase.update({
+    where: { id: supportCase.id }, data: { classification, summary: classification.summary, userType },
+  });
   const competitionId = supportCase?.competitionId || pickCompetitionId(classification.actionInput) || (isExotimer ? triggerMessage.competitionId : null);
 
-  if (supportCase || competitionId) {
+  if (!replay && (supportCase || competitionId)) {
     await prisma.message.updateMany({
       where: { id: { in: pendingInboundMessages.map((message) => message.id) } },
       data: {
@@ -1426,21 +1520,6 @@ async function processConversationReply(conversationId) {
     });
   }
 
-  await Promise.all(
-    pendingInboundMessages.map((message) =>
-      prisma.message.update({
-        where: { id: message.id },
-        data: {
-          aiMetadata: {
-            ...(message.aiMetadata || {}),
-            debounceProcessedAt: new Date().toISOString(),
-            debounceBatchLastMessageId: triggerMessage.id,
-          },
-        },
-      })
-    )
-  );
-
   await prisma.conversation.update({
     where: { id: conversation.id },
     data: {
@@ -1448,14 +1527,14 @@ async function processConversationReply(conversationId) {
       confidence: classification.confidence,
       classification,
       status: classification.needsHuman ? "WAITING_HUMAN" : "OPEN",
-      lastMessageAt: triggerMessage.timestamp,
+      ...(!replay ? { lastMessageAt: triggerMessage.timestamp } : {}),
     },
   });
 
   let actionResult = null;
   let actionError = null;
   let actionPending = null;
-  let contextActionResult = contextResolution.contextActionResult;
+  let contextActionResult = { ...(contextResolution.contextActionResult || {}), resultContext, actionHistory };
   let contextActionError = contextResolution.contextActionError;
 
   try {
@@ -1506,7 +1585,7 @@ async function processConversationReply(conversationId) {
     );
     const duplicateAction =
       IDEMPOTENT_ACTIONS.has(classification.action) &&
-      classification.actionInput?.forceRetry !== true
+      classification.actionInput?.forceRetry !== true && !replay
         ? await prisma.supportAction.findFirst({
             where: {
               conversationId: conversation.id,
@@ -1647,13 +1726,13 @@ async function processConversationReply(conversationId) {
           await Promise.all([
             prisma.conversation.update({
               where: { id: conversation.id },
-              data: { status: "RESOLVED" },
+              data: { status: classification.remainingRequests?.length ? "OPEN" : "RESOLVED" },
             }),
             supportCase?.id
               ? prisma.supportCase.update({
                   where: { id: supportCase.id },
                   data: {
-                    status: "RESOLVED",
+                    status: classification.remainingRequests?.length ? "OPEN" : "RESOLVED",
                     summary: `${supportCase.summary || classification.summary || ""} Tiempo corregido y verificado automaticamente con evidencia acumulada.`.trim(),
                     lastMessageAt: new Date(),
                   },
@@ -1720,18 +1799,18 @@ async function processConversationReply(conversationId) {
   reply = sanitizeExternalReply(reply, conversation.channel);
 
   let sent = null;
-  if (isWhatsapp) {
+  if (isWhatsapp && sendReply) {
     try {
       sent = await sendTextMessage(
         whatsappConversationRecipient(conversation),
         reply
       );
     } catch (error) {
-      console.error("No se pudo enviar respuesta WhatsApp:", error.response?.data || error.message);
+      throw new Error(`No se pudo enviar respuesta WhatsApp: ${error.message}`);
     }
   }
 
-  await prisma.message.create({
+  if (sendReply) await prisma.message.create({
     data: {
       conversationId: conversation.id,
       supportCaseId: supportCase?.id || null,
@@ -1753,6 +1832,25 @@ async function processConversationReply(conversationId) {
       timestamp: new Date(),
     },
   });
+  if (!replay && sendReply) await Promise.all(pendingInboundMessages.map(message => prisma.message.update({
+    where: { id: message.id }, data: { aiMetadata: { ...(message.aiMetadata || {}),
+      debounceProcessedAt: new Date().toISOString(), debounceBatchLastMessageId: triggerMessage.id } },
+  })));
+
+  const verifiedMutation = !actionError && !actionPending && actionResult?.verification &&
+    (classification.action === "EXOTIMER_APPLY_RESULT_TIME_EVIDENCE_CORRECTION"
+      ? actionResult.verification.verified
+      : /^EXOTIMER_UPDATE_RESULT_/.test(classification.action || ""));
+  if ((verifiedMutation && Array.isArray(classification.remainingRequests) && classification.remainingRequests.length === 0) ||
+      requestedChangeAlreadySatisfied(classification, resultContext, actionHistory)) {
+    await prisma.conversation.update({ where: { id: conversationId }, data: { status: "RESOLVED" } });
+    if (supportCase) await prisma.supportCase.update({ where: { id: supportCase.id }, data: { status: "RESOLVED" } });
+  } else if (supportCase) {
+    const current = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { status: true } });
+    await prisma.supportCase.update({ where: { id: supportCase.id }, data: {
+      status: current.status === "WAITING_HUMAN" ? "WAITING_HUMAN" : current.status === "RESOLVED" ? "RESOLVED" : !classification.action || classification.remainingRequests?.length ? "WAITING_CLARIFICATION" : "OPEN",
+    } });
+  }
 
   return {
     duplicated: false,
@@ -1762,6 +1860,10 @@ async function processConversationReply(conversationId) {
     processedInboundMessageIds: pendingInboundMessages.map((message) => message.id),
     userType,
     reply,
+    classification,
+    actionResult,
+    actionError,
+    contextActionResult,
   };
 }
 
@@ -1988,6 +2090,7 @@ module.exports = {
   processInboundExotimerMessage,
   processInboundMessage,
   processInboundText,
+  processConversationReply,
   resultHasPublishedTime,
   summarizeResultForClosure,
 };

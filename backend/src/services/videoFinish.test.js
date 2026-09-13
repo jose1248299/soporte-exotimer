@@ -101,15 +101,17 @@ test("comprueba disponibilidad y valida la hora de meta sin exponer la URL tempo
             {
               key: "loc_Salida",
               raw_id: 901,
-              read_at: "2026-08-15T14:00:00.000Z",
+              read_at: "2026-08-15T09:00:00.000",
               raw: {
                 id: 901,
                 dorsal: 2,
                 chip: "2",
                 location: "SALIDA",
-                read_at: "2026-08-15T14:00:00.000Z",
+                read_at: "2026-08-15T09:00:00.000Z",
+                zulu_at: "2026-08-15T14:00:00.000Z",
               },
             },
+            ...(corrected ? [{ key: "loc_Meta", raw_id: 902, read_at: "2026-08-15T10:36:07", raw: { id: 902, location: "META", read_at: "2026-08-15T10:36:07Z" } }] : []),
           ],
         },
       };

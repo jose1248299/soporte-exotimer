@@ -3867,7 +3867,7 @@ function normalizeResultDetail(response, catalogEvent = null, startGroups = null
       )
     : null;
   const configs = legacyConfigs
-    ? [{ id: eventId, ...legacyConfigs }]
+    ? [{ id: eventId, ...legacyConfigs, ...(matchingStartGroup?.salidas ? { salidas: matchingStartGroup.salidas } : {}) }]
     : matchingStartGroup
       ? [{ id: eventId, salidas: matchingStartGroup.salidas || matchingStartGroup.start_waves || [] }]
       : [];
@@ -3876,7 +3876,8 @@ function normalizeResultDetail(response, catalogEvent = null, startGroups = null
     raw_id: assignment.raw_id || assignment.raw?.id || assignment.id,
     dorsal: assignment.raw?.dorsal || row?.dorsal,
     chip: assignment.raw?.chip || row?.chip,
-    hour: assignment.raw?.read_at || assignment.read_at,
+    // Timing read_at is a local race clock, even when serialized with a Z.
+    hour: String(assignment.read_at || assignment.raw?.read_at || "").replace(/Z$/, "") || null,
     zulu: assignment.raw?.zulu_at || assignment.read_at,
     location: assignment.raw?.location || assignment.location || assignment.name,
     competition: row?.competition_id,
@@ -3976,6 +3977,10 @@ async function resolveResultForUpdate(input = {}) {
   const directId = input.resultId || input.result_id || input.id;
   if (directId) {
     const detail = firstDetail(await getResultDetail({ resultId: directId }));
+    const competitionId = pickCompetitionId(input);
+    if (competitionId && detail?.competition_id && String(competitionId) !== String(detail.competition_id)) {
+      throw new Error("El resultado no pertenece a la competencia solicitada.");
+    }
     return { resultId: directId, detail };
   }
 
@@ -4054,8 +4059,9 @@ function parseHms(value) {
 }
 
 function parseDurationSeconds(value) {
-  const match = String(value || "").trim().match(/^(\d{1,3}):(\d{2})(?::(\d{2}))?$/);
+  const match = String(value || "").trim().match(/^(\d{1,3}):(\d{2})(?::(\d{2}(?:\.\d+)?))?$/);
   if (!match) return null;
+  if (Number(match[2]) >= 60 || Number(match[3] || 0) >= 60) return null;
   if (match[3] === undefined) return Number(match[1]) * 60 + Number(match[2]);
   return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
 }
@@ -4148,15 +4154,11 @@ function pickEventStartDateTime(detail = {}, input = {}) {
   const selectedSalida = salidas.find((salida) => {
     const name = normalizeText(salida?.data?.nombre || salida?.name || salida?.nombre);
     return salidaName && name === salidaName;
-  }) || salidas[0];
+  }) || (salidas.length === 1 ? salidas[0] : null);
 
-  const salidaDate = selectedSalida?.data?.fecha || selectedSalida?.fecha;
+  const salidaDate = selectedSalida?.data?.fecha || selectedSalida?.fecha || selectedSalida?.starts_at?.replace(/Z$/, "");
   const parsedSalida = parseLocalDateTime(salidaDate);
   if (parsedSalida) return parsedSalida;
-
-  const salidaRaw = asArray(detail?.raws_asigments).find((raw) => normalizeText(raw?.location) === "salida");
-  const parsedRawSalida = parseLocalDateTime(salidaRaw?.hour || salidaRaw?.zulu);
-  if (parsedRawSalida) return parsedRawSalida;
 
   return parseLocalDateTime(
     input.startDateTime ||
@@ -4170,7 +4172,8 @@ function pickCompetitionDate(input = {}, detail = {}) {
   const explicit = parseDateParts(input.eventDate || input.date || input.competitionDate || input.evidenceDate || input.evidenceFinishDate);
   if (explicit) return explicit;
 
-  const eventStart = pickEventStartDateTime(detail, input);
+  const individualStart = assignedPointRaw(detail, "salida");
+  const eventStart = parseLocalDateTime(individualStart?.hour || individualStart?.zulu) || pickEventStartDateTime(detail, input);
   if (eventStart?.date) return eventStart.date;
 
   const metaDate = parseLocalDateTime(detail?.hora_meta || detail?.metaHour);
@@ -4190,7 +4193,8 @@ function buildEvidenceFinishDateTime(input = {}, detail = {}) {
   if (explicit) return explicit;
 
   const elapsedSeconds = parseDurationSeconds(input.gpsElapsedTime || input.evidenceElapsedTime || input.requestedValue);
-  const eventStart = pickEventStartDateTime(detail, input);
+  const individualStart = assignedPointRaw(detail, "salida");
+  const eventStart = parseLocalDateTime(individualStart?.hour || individualStart?.zulu) || pickEventStartDateTime(detail, input);
   const activityStartValue =
     input.activityStartDateTime ||
     input.activityStartTime ||
@@ -4273,7 +4277,7 @@ function buildAthleteEvidenceTrustAssessment(input = {}, detail = {}) {
       input.evidenceElapsedTime ||
       input.activityStartDateTime ||
       input.gpsStartDateTime ||
-      /(gps|strava|garmin|coros|reloj|actividad|ruta|distancia|desnivel)/.test(summary)
+      /(gps|strava|garmin|coros|reloj|apple watch|actividad)/.test(summary)
   );
   const hasTimeEvidence = Boolean(
     input.evidenceFinishDateTime ||
@@ -4308,7 +4312,9 @@ function buildAthleteEvidenceTrustAssessment(input = {}, detail = {}) {
 
   return {
     enabled: isTrustAthleteEvidenceEnabled(input),
-    accepted: isTrustAthleteEvidenceEnabled(input) && hasStructuredClaim && hasTimeEvidence && signals.length >= 4,
+    accepted: isTrustAthleteEvidenceEnabled(input) && hasStructuredClaim && hasTimeEvidence &&
+      (hasDorsalEvidence || hasFinishOrParticipationEvidence || hasGpsEvidence) &&
+      !input.evidenceConflict && signals.length >= 4,
     signals,
     summary: input.evidenceSummary || input.requestedCorrection || null,
   };
@@ -4341,7 +4347,7 @@ async function findCreatedRawId({ resultId, rawHour, dorsal, competitionId, loca
     const sameLocation = normalizeText(raw?.location) === normalizeText(location);
     const rawCompetition = raw?.competition ?? raw?.competition_id;
     const sameCompetition = !rawCompetition || String(rawCompetition) === String(competitionId);
-    const parsedRaw = parseLocalDateTime(raw?.hour || raw?.zulu);
+    const parsedRaw = parseLocalDateTime(raw?.hour || raw?.read_at?.replace(/Z$/, "") || raw?.zulu);
     const sameHour = parsedRaw && formatRawDateTime(parsedRaw) === rawHour;
     return sameDorsal && sameLocation && sameCompetition && sameHour;
   });
@@ -4356,7 +4362,7 @@ function resultTimingMode(detail = {}) {
   ];
   let mode = null;
   for (const source of sources) {
-    const pending = asArray(source);
+    const pending = [...asArray(source)];
     while (pending.length && !mode) {
       const config = pending.shift();
       if (!config || typeof config !== "object") continue;
@@ -4810,15 +4816,24 @@ function buildResultParticipantForm({ input, resultId, detail, mode }) {
   const patch = applyRequestedValueByMode(input, {}, mode);
 
   const nextDorsal = input.newDorsal ?? input.dorsalNew ?? input.correctDorsal ?? patch.dorsal;
-  const participantName = clean(input.participantName ?? input.athleteName ?? input.nameNew ?? input.firstName ?? patch.participantName);
+  const onlyLastname = /^(apellido|apellidos|lastname|last_name)$/.test(normalizeText(input.targetField || input.field));
+  let participantName = onlyLastname
+    ? clean(participant.name ?? detail?.participantName)
+    : clean(input.nameNew ?? input.firstName ?? patch.participantName ?? input.participantName ?? input.athleteName);
   const explicitParticipantLastname = clean(
     input.participantLastname ?? input.lastnameNew ?? input.lastName ?? input.lastname ?? input.surname ?? patch.participantLastname
   );
-  const existingParticipantLastname = clean(participant.lastname ?? detail?.participantLastname ?? detail?.lastname);
+  const storedLastname = clean(participant.lastname ?? detail?.participantLastname ?? detail?.lastname);
+  const placeholderLastname = Boolean(storedLastname && (/^[.\-\s]+$/.test(storedLastname) || normalizeText(storedLastname) === "sin asignar"));
+  const existingParticipantLastname = placeholderLastname ? undefined : storedLastname;
   const participantLastname =
     explicitParticipantLastname ??
     existingParticipantLastname ??
     deriveLastnameValue(participantName ?? patch.participantName ?? requestedValue(input) ?? participant.name ?? detail?.participantName);
+  if (mode === "participant_data" && placeholderLastname && !explicitParticipantLastname && participantLastname &&
+      participantName?.endsWith(` ${participantLastname}`)) {
+    participantName = participantName.slice(0, -participantLastname.length).trim();
+  }
   const eventName = clean(input.newDistance ?? input.distanceNew ?? input.evento_distancia ?? input.distance ?? input.eventName ?? patch.evento_distancia);
   const gender = clean(input.newGender ?? input.genderNew ?? input.genero ?? input.gender ?? input.genre ?? patch.genero);
   const categoryName = clean(input.newCategory ?? input.categoryNew ?? input.categoria ?? input.category ?? input.categoryName ?? patch.categoria);
@@ -5029,6 +5044,10 @@ async function updateResultParticipant(input, mode) {
   };
   const saved = await apiRequest(request);
   const verificationDetail = firstDetail(await getResultDetail({ resultId }));
+  if (mode === "participant_data" && (
+    normalizeText(verificationDetail?.participant?.name) !== normalizeText(form.participantName) ||
+    normalizeText(verificationDetail?.participant?.lastname) !== normalizeText(form.participantLastname)
+  )) throw new Error("Los datos personales guardados no coinciden con la verificacion posterior.");
   if (mode === "event_category") {
     const after = summarizeResultDetail(verificationDetail);
     if (
@@ -5273,6 +5292,27 @@ function buildTimeCorrectionCurrent({ input, detail, finishParts }) {
   return input.timeCurrent || input.requestedValue || input.correctValue;
 }
 
+function verifyEvidenceAssignment(detail, finishParts, proposedSeconds, rawId) {
+  const officialSeconds = pickOfficialSeconds({}, detail);
+  const assigned = assignedPointRaw(detail, "meta");
+  const actualFinish = parseLocalDateTime(assigned?.hour || assigned?.zulu);
+  const finishDifferenceSeconds = actualFinish
+    ? Math.abs(datePartsToUtcMs(actualFinish) - datePartsToUtcMs(finishParts)) / 1000
+    : null;
+  const differenceSeconds = officialSeconds == null ? null : Math.abs(officialSeconds - proposedSeconds);
+  return {
+    verified: differenceSeconds != null && differenceSeconds <= 2 &&
+      finishDifferenceSeconds != null && finishDifferenceSeconds <= 1 &&
+      String(assigned?.id || assigned?.raw_id) === String(rawId),
+    officialTime: officialSeconds == null ? null : formatDuration(officialSeconds),
+    finishAt: detail?.hora_meta || detail?.finish_at || null,
+    state: detail?.state || null,
+    differenceSeconds,
+    finishDifferenceSeconds,
+    rawId,
+  };
+}
+
 async function applyResultTimeEvidenceCorrection(input = {}) {
   let normalizedInput = await resolveCompetitionInput(normalizeDorsalReferences(input));
   let videoFinishValidation = null;
@@ -5304,6 +5344,16 @@ async function applyResultTimeEvidenceCorrection(input = {}) {
   }
   const competitionId = pickCompetitionId(normalizedInput);
   const { resultId, detail } = await resolveResultForUpdate(normalizedInput);
+  if (String(detail.competition_id || detail.competition) !== String(competitionId)) {
+    throw new Error("El resultado no pertenece a la competencia del reclamo.");
+  }
+  if (normalizedInput.evidenceConflict) {
+    throw new Error("Falta aclarar la contradiccion de identidad o distancia antes de corregir el tiempo.");
+  }
+  const declaredDistance = normalizedInput.declaredDistance || normalizedInput.distance || normalizedInput.eventName || normalizedInput.currentDistance;
+  if (declaredDistance && detail.event?.name && !sameVideoFinishDistance(declaredDistance, detail.event.name)) {
+    throw new Error(`La distancia declarada (${declaredDistance}) difiere de la registrada (${detail.event.name}); solicita aclaracion al atleta.`);
+  }
   const trustAssessment = buildAthleteEvidenceTrustAssessment(normalizedInput, detail);
   if (trustAssessment.enabled && normalizedInput.preferActivityStartForGps == null) {
     normalizedInput.preferActivityStartForGps = Boolean(
@@ -5335,6 +5385,9 @@ async function applyResultTimeEvidenceCorrection(input = {}) {
 
   const timingMode = resultTimingMode(detail);
   const isChipTiming = timingMode === "tiempo_chip";
+  if (!isChipTiming && !pickEventStartDateTime(detail, normalizedInput)) {
+    throw new Error("No se pudo verificar la salida oficial del evento para calcular el tiempo.");
+  }
   let requestedSeconds = pickRequestedSeconds(normalizedInput);
   const existingStartRaw = isChipTiming ? assignedPointRaw(detail, "salida") : null;
   if (isChipTiming && requestedSeconds == null && existingStartRaw) {
@@ -5362,9 +5415,25 @@ async function applyResultTimeEvidenceCorrection(input = {}) {
       : buildTimeCorrectionCurrent({ input: normalizedInput, detail, finishParts });
   if (!timeCurrent) throw new Error("No se pudo calcular el tiempo para asignar la hora meta.");
 
-  const officialSeconds = pickOfficialSeconds(normalizedInput, detail);
-  const proposedSeconds = requestedSeconds ?? parseDurationSeconds(timeCurrent);
-  const minDifferenceSeconds = Number(normalizedInput.minDifferenceSeconds || 120);
+  const officialSeconds = pickOfficialSeconds({}, detail);
+  // Compare official-to-official. A watch duration is not the gun time.
+  const proposedSeconds = parseDurationSeconds(timeCurrent);
+  const existingMeta = assignedPointRaw(detail, "meta");
+  const existingVerification = verifyEvidenceAssignment(detail, finishParts, proposedSeconds, existingMeta?.id);
+  if (existingVerification.verified) {
+    return {
+      created: false,
+      idempotentReplay: true,
+      type: "RESULT_TIME_EVIDENCE_CORRECTION",
+      timingMode,
+      evidencePolicy: videoFinishValidation ? VIDEO_FINISH_EVIDENCE_POLICY : trustAssessment.enabled ? "TRUST_ATHLETE_EVIDENCE" : "STRICT_EVIDENCE",
+      videoFinishValidation,
+      verification: existingVerification,
+      changed: { competitionId, resultId, dorsal, reusedRawId: existingMeta.id,
+        evidenceFinishDateTime: formatIsoLocal(finishParts), requestedOfficialTime: timeCurrent, after: existingVerification },
+    };
+  }
+  const minDifferenceSeconds = Number(normalizedInput.minDifferenceSeconds ?? (videoFinishValidation || trustAssessment.accepted ? 1 : 120));
   if (proposedSeconds == null) {
     throw new Error("Falta el tiempo propuesto para validar la correccion.");
   }
@@ -5470,8 +5539,9 @@ async function applyResultTimeEvidenceCorrection(input = {}) {
     team_computer: normalizedInput.team_computer || `reader_META_${competitionId}`,
     state: false,
   };
-  const rawResponse = await createManualRaw(rawPayload);
-  let rawId = findRawByIdCandidate(rawResponse);
+  let rawId = await findCreatedRawId({ resultId, rawHour, dorsal, competitionId, location: "META" });
+  const rawResponse = rawId ? { reused: true, id: rawId } : await createManualRaw(rawPayload);
+  rawId = rawId || findRawByIdCandidate(rawResponse);
   if (!rawId) {
     rawId = await findCreatedRawId({
       resultId,
@@ -5496,28 +5566,7 @@ async function applyResultTimeEvidenceCorrection(input = {}) {
   const verificationDetail = firstDetail(
     await getResultDetail({ resultId }).catch(() => null)
   );
-  const verifiedOfficialSeconds = verificationDetail
-    ? pickOfficialSeconds({}, verificationDetail)
-    : null;
-  const verificationDifferenceSeconds =
-    verifiedOfficialSeconds == null
-      ? null
-      : Math.abs(verifiedOfficialSeconds - proposedSeconds);
-  const verification = {
-    verified:
-      verificationDifferenceSeconds != null &&
-      verificationDifferenceSeconds <= 2,
-    officialTime:
-      verifiedOfficialSeconds == null
-        ? null
-        : formatDuration(verifiedOfficialSeconds),
-    finishAt:
-      verificationDetail?.hora_meta ||
-      verificationDetail?.finish_at ||
-      null,
-    state: verificationDetail?.state || null,
-    differenceSeconds: verificationDifferenceSeconds,
-  };
+  const verification = verifyEvidenceAssignment(verificationDetail, finishParts, proposedSeconds, rawId);
 
   return {
     created: true,

@@ -731,6 +731,7 @@ test("la correccion GPS usa la salida oficial y verifica la respuesta v1", async
         state: "finalizado",
         official_time_ms: 7794000,
         finish_at: "2026-07-29T14:15:46Z",
+        raw_assignments: [{ key: "loc_Meta", raw_id: 29599, read_at: "2026-07-29T09:15:46", raw: { id: 29599, location: "META", read_at: "2026-07-29T09:15:46Z" } }],
         document: {
           time_TOTAL: "02:09:54",
           loc_Meta: 29599,
