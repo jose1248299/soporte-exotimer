@@ -21,7 +21,9 @@ if (config.env === "production" && !process.env.DATABASE_URL?.trim()) {
 const prisma = require("./lib/prisma");
 
 app.use(cors());
-app.use(express.json({ limit: "2mb" }));
+// The bounded workbook endpoint parses its own body, before the smaller chat limit.
+app.use("/api/exotimer/start-list", require("./routes/startListImports"));
+app.use(express.json({ limit: "2mb", verify: (req, _res, buffer) => { req.rawBody = buffer; } }));
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "soporte-exotimer" });

@@ -1877,6 +1877,7 @@ async function processInboundMessage({
   displayName,
   type = "text",
   media,
+  startListVerified = false,
 }) {
   const stableUserId = normalizeWhatsappUserId(whatsappUserId);
   const phone = normalizeWhatsappRecipient(from || stableUserId);
@@ -1892,6 +1893,11 @@ async function processInboundMessage({
     whatsappUserId: stableUserId,
     displayName,
   });
+  const startListResult = await require("./startListWhatsapp").handleStartListInbound({
+    conversation, waId, phone, whatsappUserId: stableUserId, text, timestamp, type, media,
+    verified: startListVerified,
+  });
+  if (startListResult) return startListResult;
   const timerPhone = isWhatsappUserId(conversation.phone)
     ? null
     : normalizePhone(conversation.phone);

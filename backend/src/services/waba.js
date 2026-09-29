@@ -92,9 +92,11 @@ async function getMediaUrl(mediaId) {
   return data;
 }
 
-async function downloadMedia(mediaId) {
+async function downloadMedia(mediaId, { maxBytes } = {}) {
   const media = await getMediaUrl(mediaId);
+  if (maxBytes && Number(media.file_size || 0) > maxBytes) throw new Error("El archivo supera el límite de descarga.");
   const response = await axios.get(media.url, {
+    ...(maxBytes ? { maxContentLength: maxBytes, maxBodyLength: maxBytes } : {}),
     responseType: "arraybuffer",
     headers: {
       Authorization: `Bearer ${config.meta.accessToken}`,

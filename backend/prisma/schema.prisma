@@ -227,3 +227,15 @@ model PushSubscription {
   @@index([uid])
   @@index([active])
 }
+
+// One explicit Timing delegation per WhatsApp sender; the bearer stays in Registration.
+model StartListWhatsappSession {
+  phoneHash           String   @id
+  batchId             String
+  encryptedToken      String
+  expiresAt           DateTime
+  pendingConfirmation Json?
+  processingUntil     DateTime?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}

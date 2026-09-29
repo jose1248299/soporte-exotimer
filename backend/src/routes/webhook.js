@@ -2,6 +2,7 @@ const express = require("express");
 const config = require("../config");
 const { processInboundMessage } = require("../services/supportProcessor");
 const { resolveWhatsappIdentity } = require("../utils/whatsapp");
+const startList = require("../services/startListWhatsapp");
 
 const router = express.Router();
 
@@ -20,6 +21,8 @@ router.get("/", (req, res) => {
 
 router.post("/", async (req, res) => {
   try {
+    const startListVerified = startList.validMetaSignature(req.rawBody, req.get("x-hub-signature-256"));
+    if (startList.enabled() && !startListVerified) return res.sendStatus(403);
     if (!process.env.DATABASE_URL?.trim()) {
       console.error("Webhook recibido sin DATABASE_URL configurado. Mensaje no procesado.");
       return res.sendStatus(503);
@@ -46,6 +49,7 @@ router.post("/", async (req, res) => {
     res.sendStatus(200);
 
     await processInboundMessage({
+      startListVerified,
       waId: message.id || null,
       from: identity.recipient,
       whatsappUserId: identity.whatsappUserId,
@@ -70,7 +74,8 @@ router.post("/", async (req, res) => {
         contact?.profile?.name || contact?.profile?.username || null,
     });
   } catch (error) {
-    console.error("Error procesando webhook:", error);
+    // Axios errors can contain bearer headers and message bodies. Log only diagnostics.
+    console.error("Error procesando webhook:", { name: error?.name || "Error", status: error?.response?.status || null });
     if (!res.headersSent) return res.sendStatus(500);
   }
 });
