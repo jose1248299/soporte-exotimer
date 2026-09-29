@@ -28,6 +28,39 @@ function catalog(overrides = {}) {
 const ordinaryHeader = ["Nombre completo", "Dorsal", "Sexo", "Distancia", "Categoría", "Documento", "Fecha de nacimiento"];
 const ordinaryRow = ["Ana Pérez López", "001", "F", "10 km", "LIBRE", "00123456", "25/12/1990"];
 
+test("one shared permit covers parsing and structural AI while existing drafts can be resolved", { timeout: 15000 }, async () => {
+  const buffer = workbook({ "10K": [ordinaryHeader, ordinaryRow] });
+  const input = { buffer, filename: "lista.xlsx", catalog: catalog() };
+  const source = parseStartListWorkbook(input);
+  let releasePlan;
+  let enteredPlan;
+  const gate = new Promise(resolve => { releasePlan = resolve; });
+  const entered = new Promise(resolve => { enteredPlan = resolve; });
+  const first = analyzeStartList({ ...input, planAnalyzer: async () => {
+    enteredPlan(); await gate; return inferStartListPlan(source);
+  } });
+  try {
+    // The permit is already held before the first worker returns. An invalid
+    // second file is rejected as busy without spawning another parser.
+    await assert.rejects(() => analyzeStartList({ ...input, buffer: Buffer.from("invalid") }), { code: "analysis_busy" });
+    await entered;
+    await assert.rejects(() => analyzeStartList(input), { code: "analysis_busy" });
+    const revised = reanalyzeStartList({ sourceWorkbook: source, plan: inferStartListPlan(source), catalog: catalog() });
+    assert.equal(revised.candidates.length, 1);
+  } finally {
+    releasePlan(); await first;
+  }
+  assert.equal((await analyzeStartList(input)).candidates.length, 1);
+});
+
+test("analysis errors and provider fallback release the shared permit for a later upload", async () => {
+  await assert.rejects(() => analyzeStartList({ buffer: Buffer.alloc(0), filename: "invalid.xlsx", catalog: catalog() }));
+  const input = { buffer: workbook({ "10K": [ordinaryHeader, ordinaryRow] }), filename: "lista.xlsx", catalog: catalog() };
+  const fallback = await analyzeStartList({ ...input, planAnalyzer: async () => { throw new Error("synthetic provider failure"); } });
+  assert.ok(fallback.issues.some(issue => issue.code === "ai_plan_unavailable"));
+  assert.equal((await analyzeStartList(input)).candidates.length, 1);
+});
+
 test("reads every sheet and keeps physical row/cell identities without losing duplicate headers", async () => {
   const buffer = workbook({
     "10K": [["Listado de participantes"], [], ordinaryHeader, ordinaryRow, [], ["Total", 1]],

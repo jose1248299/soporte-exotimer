@@ -395,20 +395,31 @@ function buildAnalysis(parsed, catalog, proposedPlan, decisions = {}, analysisIs
   };
 }
 
+// HTTP and WhatsApp share this module in the service process. Acquire before
+// starting the parser worker and retain the permit through structural AI work.
+// Reject instead of retaining uploaded files in an unbounded waiting queue.
+let analysisActive = false;
+
 async function analyzeStartList({ buffer, mimeType, filename, catalog, decisions = {}, planAnalyzer = null }) {
-  const parsed = await parseStartListWorkbookAsync({ buffer, mimeType, filename });
-  checkSourceWorkbook(parsed);
-  let plan = inferStartListPlan(parsed);
-  const issues = [];
-  if (planAnalyzer) {
-    try {
-      const proposed = await planAnalyzer(buildStartListAnalysisContext(parsed, catalog));
-      plan = validateStartListPlan(proposed, parsed);
-    } catch {
-      issues.push({ code: "ai_plan_unavailable", severity: "warning", message: "No se pudo validar la propuesta de IA. Revisa las columnas detectadas y las filas pendientes." });
+  if (analysisActive) throw new StartListAnalysisError("analysis_busy", "Hay otro archivo en análisis. Espera unos segundos y vuelve a intentarlo.");
+  analysisActive = true;
+  try {
+    const parsed = await parseStartListWorkbookAsync({ buffer, mimeType, filename });
+    checkSourceWorkbook(parsed);
+    let plan = inferStartListPlan(parsed);
+    const issues = [];
+    if (planAnalyzer) {
+      try {
+        const proposed = await planAnalyzer(buildStartListAnalysisContext(parsed, catalog));
+        plan = validateStartListPlan(proposed, parsed);
+      } catch {
+        issues.push({ code: "ai_plan_unavailable", severity: "warning", message: "No se pudo validar la propuesta de IA. Revisa las columnas detectadas y las filas pendientes." });
+      }
     }
+    return buildAnalysis(parsed, catalog, plan, decisions, issues);
+  } finally {
+    analysisActive = false;
   }
-  return buildAnalysis(parsed, catalog, plan, decisions, issues);
 }
 
 function reanalyzeStartList({ workbook, sourceWorkbook, catalog, decisions = {}, plan }) {

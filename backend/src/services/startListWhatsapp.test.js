@@ -329,3 +329,14 @@ test("reanalyzing a partial import preserves attempted participants and their di
   assert.deepEqual(preserved.unassignedRows, []);
   assert.deepEqual(preserved.questions.map(question => question.rowIds), [["new"]]);
 });
+
+test("a busy shared analyzer asks for a later resend without changing the draft or holding the chat lease", async () => {
+  const h = harness();
+  const before = structuredClone(h.batch);
+  h.dependencies.analyze = async () => { throw Object.assign(new Error("Another file is being analyzed"), { code: "analysis_busy" }); };
+  await h.send("", { type: "document", media: { id: "synthetic-media", filename: "lista.csv", mimeType: "text/csv" } });
+  assert.match(h.sends.at(-1).text, /otro archivo en análisis.*vuelve a enviar tu archivo/);
+  assert.deepEqual(h.batch, before);
+  assert.equal(h.session.processingUntil, null);
+  assert.equal(h.calls.filter(call => ["preview", "commit"].includes(call.path) || call.options.method === "PATCH").length, 0);
+});

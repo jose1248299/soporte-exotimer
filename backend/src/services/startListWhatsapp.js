@@ -338,6 +338,7 @@ async function handleStartListInbound(input, dependencies = {}) {
     return await reply(review.text);
   } catch (error) {
     if (link) return await reply("No pude vincular ese código. Genera uno nuevo desde Start List en Timing y envía VINCULAR seguido del código.");
+    if (error.code === "analysis_busy") return await reply("Hay otro archivo en análisis. Espera unos segundos y vuelve a enviar tu archivo. El borrador anterior sigue guardado.");
     const status = error.response?.status;
     if ([401, 403].includes(status) && !leaseLost) {
       await removeSession().catch(() => {});

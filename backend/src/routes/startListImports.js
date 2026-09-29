@@ -46,6 +46,7 @@ async function limited(req, res, run) {
   active.add(key); starts.set(quotaKey, [...times, now]);
   try { res.set("Cache-Control", "no-store").json(await run()); }
   catch (error) {
+    if (error.code === "analysis_busy") return res.status(429).set("Retry-After", "10").json({ error: error.message, code: error.code });
     const known = error.name === "StartListAnalysisError" || error.name === "ZodError";
     res.status(known ? 422 : 400).json({ error: known ? error.message : "No se pudo analizar la propuesta. Revisa el archivo y la configuración.", code: error.code || "START_LIST_ANALYSIS_FAILED" });
   } finally { active.delete(key); }

@@ -22,6 +22,8 @@ En categorías Básicas se resuelve una categoría existente; la fecha de nacimi
 
 Límites: archivo 10 MB; 32 hojas; 80 columnas; 10 000 filas con datos; fuente serializada 5 MB; XLSX expandido 64 MB. La lectura se ejecuta en un worker con 256 MB y 10 segundos. El borrador completo de Registration admite 32 MB para conservar la fuente, propuesta, validaciones y recibos. Un archivo muy denso puede alcanzar los límites de fuente o borrador antes de las 10 000 filas.
 
+Cada proceso del servicio admite un solo análisis de archivo a la vez, compartido entre Timing y WhatsApp. El permiso cubre tanto el worker de lectura como la propuesta estructural de IA y se libera también cuando hay errores. Otro archivo recibe un rechazo reintentable, sin permanecer en una cola en memoria: HTTP devuelve `429`, código `analysis_busy` y `Retry-After: 10`; WhatsApp solicita volver a enviar el archivo. Resolver opciones de un borrador ya leído puede continuar. Este límite protege la instancia actual de 500 MB y no implica cambiar su tamaño ni su costo.
+
 ## Canal Timing
 
 El navegador usa el BFF de Timing en `/api/start-list/imports`. El BFF verifica la sesión y los permisos de la competencia, consulta el catálogo y llama a este servicio desde el servidor.

@@ -4,10 +4,11 @@ const express = require("express");
 
 const calls = [];
 let analysisGate = null;
+let analysisError = null;
 const authoritative = [{ id: "distance:trusted", options: [{ id: "event:1", label: "10K" }] }];
 require.cache[require.resolve("../config")] = { exports: { security: { exotimerApiKey: "synthetic-service-key" } } };
 require.cache[require.resolve("./startListAnalysis")] = { exports: {
-  analyzeStartList: async input => { calls.push({ kind: "analyze", input }); if (analysisGate) await analysisGate; return { candidates: [], questions: authoritative }; },
+  analyzeStartList: async input => { calls.push({ kind: "analyze", input }); if (analysisError) throw analysisError; if (analysisGate) await analysisGate; return { candidates: [], questions: authoritative }; },
   reanalyzeStartList: input => { calls.push({ kind: "rebuild", input }); return { questions: authoritative, candidates: [] }; },
 } };
 require.cache[require.resolve("./startListAi")] = { exports: {
@@ -47,6 +48,20 @@ test("a trusted existing-competition upload reaches only the structural analysis
     assert.equal(calls.length, 1);
     assert.equal(calls[0].input.buffer.toString(), "Nombre\nPrueba");
     assert.equal(calls[0].input.catalog.competitionId, 1);
+  });
+});
+
+test("a globally busy analyzer returns a retryable response and releases the HTTP operator", async () => {
+  await serve(async url => {
+    const options = { method: "POST", headers: { ...headers, "X-Startlist-Operator": "b".repeat(64) }, body: JSON.stringify(upload) };
+    analysisError = Object.assign(new Error("Hay otro archivo en análisis. Vuelve a intentarlo."), { name: "StartListAnalysisError", code: "analysis_busy" });
+    try {
+      const response = await fetch(`${url}/analyze`, options);
+      assert.equal(response.status, 429);
+      assert.equal(response.headers.get("Retry-After"), "10");
+      assert.equal((await response.json()).code, "analysis_busy");
+    } finally { analysisError = null; }
+    assert.equal((await fetch(`${url}/analyze`, options)).status, 200);
   });
 });
 
