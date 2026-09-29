@@ -6,10 +6,12 @@ const {
   validMetaSignature, renderReview, channelRequest,
   preserveAttemptedAnalysis,
 } = require("./startListWhatsapp");
+const { createRequestLimiter } = require("./startListWhatsappAccess");
 
-const previous = Object.fromEntries(["START_LIST_IMPORTS_ENABLED", "START_LIST_WHATSAPP_ENABLED", "START_LIST_WHATSAPP_ENCRYPTION_KEY"].map(name => [name, process.env[name]]));
+const previous = Object.fromEntries(["START_LIST_IMPORTS_ENABLED", "START_LIST_WHATSAPP_ENABLED", "START_LIST_WHATSAPP_ENCRYPTION_KEY", "START_LIST_WHATSAPP_AUTH_MODE"].map(name => [name, process.env[name]]));
 process.env.START_LIST_IMPORTS_ENABLED = "true";
 process.env.START_LIST_WHATSAPP_ENABLED = "true";
+process.env.START_LIST_WHATSAPP_AUTH_MODE = "meta_signature";
 process.env.START_LIST_WHATSAPP_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
 test.after(() => { for (const [name, value] of Object.entries(previous)) { if (value == null) delete process.env[name]; else process.env[name] = value; } });
 const DBNULL = Symbol("Prisma.DbNull");
@@ -34,6 +36,8 @@ function harness({ linked = true, count = 1 } = {}) {
   const updates = [];
   const sends = [];
   const calls = [];
+  const timer = { id: 17, phone: "51900000001", active: true };
+  let sessionReads = 0;
   let sequence = 0;
   const candidates = Array.from({ length: count }, (_, index) => ({ id: `row-${index}`, source: { sheetName: "Lista", row: index + 2 }, values: { fullName: `Participante de prueba ${index}`, gender: "F", category: "Libre", distance: "10K", start: "General", dorsal: String(index + 1) }, eventId: 100, categoryId: 200, categoryMode: "basic", policyVersion: 1, issues: [] }));
   let batch = {
@@ -44,8 +48,9 @@ function harness({ linked = true, count = 1 } = {}) {
   const catalog = { competitionId: 10, events: [{ id: 100, name: "10K", categoryMode: "basic", policyVersion: 1, categories: [{ id: 200, name: "Libre", gender: "F" }], starts: [{ id: 300, name: "General" }] }] };
   const patch = data => { for (const [key, value] of Object.entries(data)) session[key] = value === DBNULL ? null : structuredClone(value); };
   const prisma = {
+    timerContact: { findFirst: async ({ where }) => matches(timer, where) ? structuredClone(timer) : null },
     startListWhatsappSession: {
-      findUnique: async ({ where }) => matches(session, where) ? structuredClone(session) : null,
+      findUnique: async ({ where }) => { sessionReads++; return matches(session, where) ? structuredClone(session) : null; },
       upsert: async ({ create, update }) => {
         if (!session) session = { pendingConfirmation: null, processingUntil: null, ...structuredClone(create) };
         else patch(update);
@@ -103,7 +108,7 @@ function harness({ linked = true, count = 1 } = {}) {
     throw new Error(`Unexpected mocked path ${path}`);
   };
   const dependencies = {
-    prisma, dbNull: DBNULL, now: () => new Date(time),
+    prisma, dbNull: DBNULL, now: () => new Date(time), allowRequest: () => true,
     waba: { sendTextMessage: async (phone, text) => { sends.push({ phone, text }); return { messages: [{ id: `out-${sends.length}` }] }; }, downloadMedia: async () => ({ buffer: Buffer.from("test-only"), mimeType: "text/csv" }) },
     request: async (path, options) => { calls.push({ path, options: structuredClone(options) }); return overrideRequest ? overrideRequest(path, options, defaultRequest) : defaultRequest(path, options); },
     analyze: async () => structuredClone(batch.metadata.start_list.analysis),
@@ -111,7 +116,8 @@ function harness({ linked = true, count = 1 } = {}) {
     resolve: async () => ({ answers: [], clarification: "" }),
   };
   return {
-    dependencies, calls, updates, sends, messages, catalog,
+    dependencies, calls, updates, sends, messages, catalog, timer,
+    get sessionReads() { return sessionReads; },
     get session() { return session; }, get batch() { return batch; },
     advance(ms) { time = new Date(time.getTime() + ms); },
     overrideRequest(fn) { overrideRequest = fn; },
@@ -189,18 +195,103 @@ test("the exact reviewed command commits only its selected rows and consumes con
   h.batch.metadata.start_list.analysis.candidates[1].issues = [{ severity: "error", message: "Fixture pending" }];
   const review = await h.send("ESTADO");
   const confirmation = structuredClone(h.session.pendingConfirmation);
-  assert.ok(review.reply.includes(confirmation.command));
+  assert.match(confirmation.command, /^CONFIRMAR [A-F0-9]{8} V\d+ [A-F0-9]{32}$/);
+  assert.ok(h.sends.at(-1).text.includes(confirmation.command));
+  assert.ok(!review.reply.includes(confirmation.command));
+  assert.ok(h.messages.every(message => !message.content?.includes(confirmation.command)));
   assert.deepEqual(confirmation.rowKeys, ["row-0"]);
   h.overrideRequest(async (path, options, fallback) => {
     if (path === "commit") assert.equal(h.session.pendingConfirmation, null);
     return fallback(path, options);
   });
   await h.send(confirmation.command);
+  assert.ok(h.messages.every(message => !message.content?.includes(confirmation.command)));
   assert.deepEqual(h.calls.find(call => call.path === "commit").options.body.row_keys, ["row-0"]);
   assert.equal(h.batch.rows[0].status, "imported");
   assert.equal(h.batch.rows[1].status, "ready");
   assert.equal(h.session.processingUntil, null);
 });
+
+async function registeredMode(run) {
+  process.env.START_LIST_WHATSAPP_AUTH_MODE = "registered_timer";
+  try { await run(); } finally { process.env.START_LIST_WHATSAPP_AUTH_MODE = "meta_signature"; }
+}
+const registeredInput = { verified: false, authorization: { mode: "registered_timer", phone: "51900000001", timerContactId: 17 } };
+
+test("registered-timer mode pins responses and session keys to the directory phone, ignoring injected IDs", () => registeredMode(async () => {
+  const h = harness();
+  await h.send("ESTADO", { ...registeredInput, whatsappUserId: "PE.666666666" });
+  assert.ok(h.sends.length);
+  assert.ok(h.sends.every(message => message.phone === h.timer.phone));
+  assert.ok(h.calls.every(call => call.options.phoneHash === senderHash(h.timer.phone)));
+  const command = h.session.pendingConfirmation.command;
+  await h.send(command, { ...registeredInput, whatsappUserId: "PE.666666666" });
+  assert.equal(h.batch.rows[0].status, "imported");
+  await h.send(command, registeredInput);
+  assert.equal(h.calls.filter(call => call.path === "commit").length, 1);
+}));
+
+test("unknown or inactive phones cannot read a session, download files, or reach Registration", () => registeredMode(async () => {
+  for (const extra of [{ phone: "51900000009" }, { inactive: true }, { phone: "+51900000001" }, { phone: "" }]) {
+    const h = harness();
+    if (extra.inactive) h.timer.active = false;
+    h.dependencies.waba.downloadMedia = async () => { throw new Error("An unauthorized file must not be fetched"); };
+    const result = await h.send("", { ...registeredInput, ...extra, type: "document", media: { id: "unknown", filename: "lista.csv" } });
+    assert.deepEqual(result, { handled: true, denied: true });
+    assert.equal(h.sessionReads, 0);
+    assert.equal(h.calls.length, 0);
+    assert.equal(h.messages.length, 0);
+    assert.equal(h.sends.length, 0);
+  }
+}));
+
+test("revoking a registered timer during validation blocks the following commit and removes its local session", () => registeredMode(async () => {
+  const h = harness();
+  await h.send("ESTADO", registeredInput);
+  const command = h.session.pendingConfirmation.command;
+  h.overrideRequest(async (path, options, fallback) => {
+    const value = await fallback(path, options);
+    if (path === "batch" && options.method === "GET") h.timer.active = false;
+    return value;
+  });
+  const result = await h.send(command, registeredInput);
+  assert.equal(result.denied, true);
+  assert.equal(h.calls.filter(call => call.path === "commit").length, 0);
+  assert.equal(h.session, null);
+}));
+
+test("five forged confirmations invalidate the secret command and impose a persistent cooldown", () => registeredMode(async () => {
+  const h = harness();
+  await h.send("ESTADO", registeredInput);
+  const realCommand = h.session.pendingConfirmation.command;
+  const forged = `${realCommand.slice(0, -32)}${"0".repeat(32)}`;
+  for (let count = 0; count < 5; count++) await h.send(forged, registeredInput);
+  assert.equal(h.session.pendingConfirmation.failedAttempts, 5);
+  assert.ok(h.session.pendingConfirmation.lockedUntil);
+  assert.equal(h.session.pendingConfirmation.command, undefined);
+  await h.send(realCommand, registeredInput);
+  await h.send("ESTADO", registeredInput);
+  assert.equal(h.session.pendingConfirmation.command, undefined);
+  assert.equal(h.calls.filter(call => call.path === "commit").length, 0);
+  h.advance(5 * 60000 + 1);
+  await h.send("ESTADO", registeredInput);
+  assert.notEqual(h.session.pendingConfirmation.command, realCommand);
+  await h.send(realCommand, registeredInput);
+  assert.equal(h.calls.filter(call => call.path === "commit").length, 0);
+}));
+
+test("request limits stop repeated commands before recording or sending messages or calling Registration", () => registeredMode(async () => {
+  const h = harness();
+  h.dependencies.allowRequest = createRequestLimiter({ maxPerPhone: 2, minIntervalMs: 1000 });
+  await h.send("ESTADO", registeredInput);
+  const before = { calls: h.calls.length, messages: h.messages.length, sends: h.sends.length };
+  assert.equal((await h.send("ESTADO", registeredInput)).rateLimited, true);
+  assert.deepEqual({ calls: h.calls.length, messages: h.messages.length, sends: h.sends.length }, before);
+  h.advance(1000);
+  await h.send("ESTADO", registeredInput);
+  h.advance(1000);
+  assert.equal((await h.send("ESTADO", registeredInput)).rateLimited, true);
+}));
 
 test("stale version, token, assignment, row set or expired confirmation blocks every write", async () => {
   const changes = [

@@ -17,6 +17,7 @@ const { normalizeDorsalReferences } = require("../utils/dorsal");
 const { isVideoFinishEvidence } = require("../utils/videoFinish");
 const { canonicalizeResultInput, compactAction, applyAthleteReviewPolicy, requestedChangeAlreadySatisfied } = require("./athleteReview");
 const { normalizePhone } = require("../utils/phone");
+const startListAccess = require("./startListWhatsappAccess");
 const {
   isWhatsappUserId,
   normalizeWhatsappRecipient,
@@ -1298,6 +1299,7 @@ async function findPendingInboundMessages(conversationId) {
   const pending = [...candidates]
     .reverse()
     .filter((message) => {
+      if (startListAccess.isStartListMessage(message)) return false;
       if (message.aiMetadata?.debounceProcessedAt) return false;
       if (!lastOutbound) return true;
       if (message.timestamp > lastOutbound.timestamp) return true;
@@ -1371,9 +1373,9 @@ async function runConversationReply(conversationId, { replay, preview, sendReply
       })
     : null;
 
-  const pendingInboundMessages = replay
+  const pendingInboundMessages = (replay
     ? await prisma.message.findMany({ where: { conversationId, direction: "INBOUND" }, orderBy: { timestamp: "desc" }, take: 1 })
-    : await findPendingInboundMessages(conversation.id);
+    : await findPendingInboundMessages(conversation.id)).filter(message => !startListAccess.isStartListMessage(message));
   if (!pendingInboundMessages.length) return null;
 
   const recentMessages = await prisma.message.findMany({
@@ -1384,7 +1386,7 @@ async function runConversationReply(conversationId, { replay, preview, sendReply
   const actionHistory = (await prisma.supportAction.findMany({
     where: { conversationId }, orderBy: { id: "desc" }, take: 30,
   })).reverse().map(compactAction);
-  const history = [...recentMessages].reverse().map(compactMessage);
+  const history = recentMessages.filter(message => !startListAccess.isStartListMessage(message)).reverse().map(compactMessage);
   const triggerMessage = pendingInboundMessages[pendingInboundMessages.length - 1];
   const contextText = buildExotimerContextText(triggerMessage, conversation);
   const processableText = [contextText, buildCombinedProcessableText(pendingInboundMessages)].filter(Boolean).join("\n\n");
@@ -1878,9 +1880,17 @@ async function processInboundMessage({
   type = "text",
   media,
   startListVerified = false,
+  startListAuthorization = null,
 }) {
-  const stableUserId = normalizeWhatsappUserId(whatsappUserId);
-  const phone = normalizeWhatsappRecipient(from || stableUserId);
+  let stableUserId = normalizeWhatsappUserId(whatsappUserId);
+  let phone = normalizeWhatsappRecipient(from || stableUserId);
+  if (startListAuthorization?.mode === "registered_timer") {
+    const timer = await startListAccess.findActiveTimer(prisma, from);
+    if (!timer) return { handled: true, denied: true };
+    phone = timer.phone;
+    stableUserId = ""; displayName = null;
+    startListAuthorization = { mode: "registered_timer", phone: timer.phone, timerContactId: timer.id };
+  }
   if (!phone) throw new Error("Remitente de WhatsApp invalido.");
 
   if (waId) {
@@ -1896,6 +1906,7 @@ async function processInboundMessage({
   const startListResult = await require("./startListWhatsapp").handleStartListInbound({
     conversation, waId, phone, whatsappUserId: stableUserId, text, timestamp, type, media,
     verified: startListVerified,
+    authorization: startListAuthorization,
   });
   if (startListResult) return startListResult;
   const timerPhone = isWhatsappUserId(conversation.phone)
@@ -1911,7 +1922,7 @@ async function processInboundMessage({
     orderBy: { timestamp: "desc" },
     take: 12,
   });
-  const previousHistory = [...previousMessages].reverse().map(compactMessage);
+  const previousHistory = previousMessages.filter(message => !startListAccess.isStartListMessage(message)).reverse().map(compactMessage);
 
   let mediaPayload = null;
   let mediaAnalysis = null;

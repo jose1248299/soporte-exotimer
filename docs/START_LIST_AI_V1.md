@@ -1,6 +1,6 @@
 # Importador Start List con IA — primera versión
 
-Implementación local del 29 de septiembre de 2026. La activación y las migraciones de producción se realizan por separado.
+Flujo implementado el 29 de septiembre de 2026. La activación de los canales y las migraciones de producción se coordinan por separado.
 
 ## Alcance
 
@@ -22,7 +22,7 @@ En categorías Básicas se resuelve una categoría existente; la fecha de nacimi
 
 Límites: archivo 10 MB; 32 hojas; 80 columnas; 10 000 filas con datos; fuente serializada 5 MB; XLSX expandido 64 MB. La lectura se ejecuta en un worker con 256 MB y 10 segundos. El borrador completo de Registration admite 32 MB para conservar la fuente, propuesta, validaciones y recibos. Un archivo muy denso puede alcanzar los límites de fuente o borrador antes de las 10 000 filas.
 
-Cada proceso del servicio admite un solo análisis de archivo a la vez, compartido entre Timing y WhatsApp. El permiso cubre tanto el worker de lectura como la propuesta estructural de IA y se libera también cuando hay errores. Otro archivo recibe un rechazo reintentable, sin permanecer en una cola en memoria: HTTP devuelve `429`, código `analysis_busy` y `Retry-After: 10`; WhatsApp solicita volver a enviar el archivo. Resolver opciones de un borrador ya leído puede continuar. Este límite protege la instancia actual de 500 MB y no implica cambiar su tamaño ni su costo.
+Cada proceso del servicio admite un solo análisis de archivo a la vez, compartido entre Timing y WhatsApp. El permiso cubre tanto el worker de lectura como la propuesta estructural de IA y se libera también cuando hay errores. Otro archivo recibe un rechazo reintentable, sin permanecer en una cola en memoria: HTTP devuelve `429`, código `analysis_busy` y `Retry-After: 10`; WhatsApp solicita volver a enviar el archivo. Resolver opciones de un borrador ya leído puede continuar. Este límite acota la concurrencia; no cambia automáticamente el tamaño ni el costo de la instancia.
 
 ## Canal Timing
 
@@ -45,14 +45,22 @@ Si el proceso se reinicia durante un guardado, consultar el borrador comprueba e
 2. Timing entrega un comando `VINCULAR <código>`, de un solo uso y con vencimiento de diez minutos.
 3. Al enviar ese comando al WhatsApp de soporte, se delega acceso exclusivamente al borrador seleccionado. Puede ser un borrador vacío para recibir el archivo después.
 4. El usuario envía el Excel/CSV y resuelve las preguntas en el chat. Se utiliza el mismo motor y el mismo catálogo que en Timing.
-5. El bot presenta el resultado de la validación y un comando de confirmación. Se debe copiar exactamente el comando vigente. Está ligado a la versión, token de revisión y conjunto de filas mostrado; vence a los quince minutos.
+5. El bot presenta el resultado de la validación y un comando de confirmación, por ejemplo `CONFIRMAR A1B2C3D4 V2 <código de 32 caracteres hexadecimales>`. Se debe copiar exactamente el comando recibido. Su secreto aleatorio tiene 128 bits, está ligado a la versión, token de revisión y conjunto de filas mostrado, y vence a los quince minutos. Se consume antes del primer guardado. El secreto se envía únicamente al destinatario de WhatsApp: se oculta en el historial, los comprobantes y el resultado interno del procesador, y nunca se devuelve como respuesta del webhook.
 6. `ESTADO` recupera el borrador y permite revisar nuevamente. `CANCELAR IMPORTACION` revoca el vínculo y conserva el borrador y los participantes ya importados. También puede revocarse desde Timing.
 
 El acceso delegado dura como máximo una hora y nunca más que la sesión original de Timing. Cada operación vuelve a comprobar la cuenta, sus permisos actuales y la competencia. Un teléfono de soporte por sí solo no concede acceso a Timing. Para cambiar de competencia se necesita otro vínculo emitido desde Timing.
 
 El token de Timing permanece cifrado en Registration. Soporte conserva únicamente una concesión opaca, también cifrada y vinculada al identificador del remitente. La tabla `StartListWhatsappSession` guarda el estado temporal y el control de concurrencia del chat. Los códigos no se guardan como mensajes en claro. Las notificaciones duplicadas y las confirmaciones vencidas no ejecutan una nueva importación.
 
-Al activar este canal, el webhook requiere la firma `X-Hub-Signature-256` de Meta sobre el cuerpo original. El flujo de importación se intercepta antes del agente general de soporte; éste no recibe nuevas herramientas generales para insertar participantes.
+El modo predeterminado `meta_signature` requiere la firma `X-Hub-Signature-256` de Meta sobre el cuerpo original. La alternativa explícita `registered_timer` permite operar sin `META_APP_SECRET` bajo el modelo de confianza del directorio de cronometradores de soporte. Un comando, documento o respuesta de una importación vinculada exige que `message.from` sea un teléfono numérico completo de 8 a 15 dígitos y coincida exactamente con un `TimerContact` activo. No se infieren prefijos de país. Se ignoran el teléfono de la tarjeta de contacto, `from_user_id`, otros IDs y nombres aportados por ese cuerpo para establecer la identidad o enviar respuestas del importador. Destino y sesión quedan fijados al teléfono del directorio antes de crear la conversación. Se vuelve a comprobar el contacto en cada comando y antes de cada bloque de guardado.
+
+Si `META_APP_SECRET` está configurado, una firma ausente o inválida se rechaza también en `registered_timer`; no hay descenso automático al modo de confianza. Estar en el directorio no concede permisos sobre competencias: sigue siendo obligatorio vincular un borrador desde una sesión válida de Timing, y Registration comprueba sus permisos y vencimiento en cada operación.
+
+Límites por proceso: como máximo 30 solicitudes de entrada de importación por teléfono/minuto y 300 globales, con separación mínima de 500 ms; el adaptador admite 12 operaciones por teléfono/minuto y 120 globales, con separación mínima de un segundo. Las estructuras de control tienen un máximo de 2000 teléfonos. Cinco confirmaciones inválidas bloquean la confirmación durante cinco minutos e invalidan el comando anterior; el bloqueo queda en la sesión persistente y no se reinicia con `ESTADO` durante ese plazo. Los reintentos bloqueados no generan nuevas consultas al modelo ni envíos a Registration.
+
+**Riesgo residual del modo `registered_timer`:** un teléfono dentro del cuerpo HTTP no demuestra que el mensaje provenga de Meta. Alguien que falsifique un número conocido podría modificar un borrador, solicitar mensajes al destinatario o consumir parte de los límites. Para materializar una nueva importación sigue necesitando el comando secreto de la propuesta vigente, entregado únicamente al teléfono registrado, además del acceso delegado de Timing. Esta garantía corresponde al importador nuevo. Los mensajes ajenos a Start List conservan el comportamiento previo del agente de soporte, que ya confiaba en el teléfono cuando la verificación de firma no estaba activada; este cambio no añade herramientas ni amplía sus permisos, y no corrige ese riesgo previo. Usar `meta_signature` proporciona autenticación del origen de todos los mensajes cuando el canal está habilitado.
+
+Los mensajes procesados por Start List quedan separados del agente general: no participan en sus ejecuciones pendientes, reproducciones ni historial para decidir acciones. Esto evita que una importación ya manejada se reinterprete posteriormente como una instrucción de soporte.
 
 ## Configuración y activación
 
@@ -66,7 +74,8 @@ Las banderas se evalúan en el servidor y están apagadas por defecto. No agrega
 | Timing y soporte | `SUPPORT_EXOTIMER_API_KEY` | Clave compartida entre servidores |
 | Soporte | `OPENAI_API_KEY`, `OPENAI_MODEL` | Configuración existente del proveedor; el modelo debe admitir el contrato estructurado |
 | Soporte | `START_LIST_WHATSAPP_ENABLED=true` | Habilita la recepción y confirmación desde WhatsApp |
-| Soporte | `META_APP_SECRET` | Verifica las firmas de Meta |
+| Soporte | `START_LIST_WHATSAPP_AUTH_MODE` | `meta_signature` por defecto; `registered_timer` habilita explícitamente el modelo de confianza descrito arriba |
+| Soporte | `META_APP_SECRET` | Obligatorio en `meta_signature`; si se configura, se exige firma válida también en `registered_timer` |
 | Soporte | `START_LIST_WHATSAPP_ENCRYPTION_KEY` | Clave aleatoria de 32 bytes, codificada en base64, para las concesiones |
 | Soporte | `START_LIST_REGISTRATION_INTERNAL_TOKEN` | Token interno autorizado por Registration |
 | Soporte | `RACELINE_API_BASE_URL` o `EXOTIMER_API_BASE_URL` | Base existente de los microservicios |
@@ -91,8 +100,8 @@ Para retirar la funcionalidad, apagar las banderas y regresar al importador manu
 
 Los tests usan libros sintéticos y dobles de Identity, catálogo, Registration, proveedor IA y WhatsApp. Ejecutar `npm test` y `npm run prisma:generate` en soporte; consultar los tests del BFF/UI en Timing y los servicios de importación en Registration/Timing Processing.
 
-Verificado localmente: 79 pruebas de soporte aprobadas, 39 pruebas de UI/BFF aprobadas, generación Prisma y compilación completa de Timing aprobadas. Se revisó la interfaz con componentes reales y datos ficticios. Un caso adicional comprobó la conversión del motor al contrato Pydantic de Registration para Básica sin nacimiento y Detallada con nacimiento, preservando ceros iniciales de documentos.
+Verificado localmente: 101 pruebas de soporte aprobadas, 39 pruebas de UI/BFF aprobadas, generación Prisma y compilación completa de Timing aprobadas. La cobertura de soporte incluye firmas, modo de cronometrador registrado, destinatarios falsificados, contacto revocado, confirmación privada, límites y aislamiento del agente general. Se revisó la interfaz con componentes reales y datos ficticios. Un caso adicional comprobó la conversión del motor al contrato Pydantic de Registration para Básica sin nacimiento y Detallada con nacimiento, preservando ceros iniciales de documentos.
 
 Backend: 205 pruebas de Registration aprobadas y 15 omitidas; 29 pruebas focales de Timing Processing aprobadas. Se comprobaron caídas durante el guardado, bloqueos activos y conciliación del acuse sin una segunda materialización. Las verificaciones que requieren PostgreSQL real están pendientes.
 
-No se han llamado al proveedor IA ni a WhatsApp reales, importado participantes de producción o desplegado estos cambios. Las migraciones de PostgreSQL deben ensayarse antes de activar; el entorno local no tiene un daemon PostgreSQL/Docker disponible.
+Las pruebas automatizadas no llaman al proveedor IA ni a WhatsApp reales ni importan participantes de producción. La comprobación de migraciones, despliegues y banderas se realiza por separado. Falta completar una importación de extremo a extremo con el canal real y una competencia de prueba autorizada.

@@ -4,7 +4,7 @@ const config = require("../config");
 const { Prisma } = require("@prisma/client");
 const { analyzeStartList, reanalyzeStartList } = require("./startListAnalysis");
 const { analyzeStartListPlan, resolveConversationAnswers } = require("./startListAi");
-const { spreadsheetKind } = require("./startListWorkbook");
+const access = require("./startListWhatsappAccess");
 
 const enabled = () => process.env.START_LIST_WHATSAPP_ENABLED === "true" && process.env.START_LIST_IMPORTS_ENABLED === "true";
 
@@ -89,9 +89,15 @@ function preserveAttemptedAnalysis(updated, previous, rows) {
       ready: candidates.filter(row => row.status !== "pending").length } };
 }
 
-function confirmationCommand(batch, rowKeys = [], nonce = crypto.randomBytes(4).toString("hex")) {
-  const digest = crypto.createHash("sha256").update(JSON.stringify([batch.id, batch.version, batch.preview_token, rowKeys, nonce])).digest("hex").slice(0, 8).toUpperCase();
+function confirmationCommand(batch, rowKeys = [], nonce = crypto.randomBytes(16).toString("hex")) {
+  const digest = crypto.createHash("sha256").update(JSON.stringify([batch.id, batch.version, batch.preview_token, rowKeys, nonce])).digest("hex").slice(0, 32).toUpperCase();
   return `CONFIRMAR ${batch.id.slice(0, 8).toUpperCase()} V${batch.version} ${digest}`;
+}
+
+function matchesConfirmation(value, expected) {
+  if (typeof expected !== "string" || !/^CONFIRMAR [A-F0-9]{8} V\d+ [A-F0-9]{32}$/.test(expected)) return false;
+  const actual = Buffer.from(String(value).toUpperCase()), target = Buffer.from(expected);
+  return actual.length === target.length && crypto.timingSafeEqual(actual, target);
 }
 
 function selectionHash(batch, rowKeys) {
@@ -124,8 +130,17 @@ function renderReview(batch) {
 }
 
 async function handleStartListInbound(input, dependencies = {}) {
-  if (!enabled() || input.verified !== true) return null;
+  if (!enabled()) return null;
   const prisma = dependencies.prisma || require("../lib/prisma");
+  const registeredMode = access.authMode() === "registered_timer";
+  const { content, link, spreadsheet, requested } = access.startListInput(input);
+  let timer = null;
+  if (registeredMode) {
+    if (input.authorization?.mode !== "registered_timer") return requested ? { handled: true, denied: true } : null;
+    timer = await access.findActiveTimer(prisma, input.phone);
+    if (!timer || input.authorization.phone !== timer.phone || input.authorization.timerContactId !== timer.id) return { handled: true, denied: true };
+    input = { ...input, phone: timer.phone, whatsappUserId: null };
+  } else if (input.verified !== true) return null;
   const waba = dependencies.waba || require("./waba");
   const request = dependencies.request || channelRequest;
   const analyze = dependencies.analyze || analyzeStartList;
@@ -135,21 +150,17 @@ async function handleStartListInbound(input, dependencies = {}) {
   const dbNull = dependencies.dbNull || Prisma.DbNull;
   const leaseMs = 5 * 60 * 1000;
   const now = clock();
-  const content = String(input.text || "").trim();
-  const link = /^VINCULAR\s+([A-F0-9]{20})$/i.exec(content);
-  const normalizedIntent = content.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
-  const importIntent = /\b(?:importar|importa|importacion|cargar|carga|subir|sube)\b.{0,80}\b(?:participantes|start[\s-]?list|listado|lista|excel|csv)\b/.test(normalizedIntent);
-  const spreadsheet = input.type === "document" && spreadsheetKind(input.media?.filename, input.media?.mimeType);
   const hash = senderHash(input.whatsappUserId || input.phone);
   let session = await prisma.startListWhatsappSession.findUnique({ where: { phoneHash: hash } });
-  if (!link && !spreadsheet && !session && !importIntent) return null;
+  if (!session && !requested) return null;
+  if (!(dependencies.allowRequest || access.allowImportRequest)(hash, clock().getTime())) return { handled: true, rateLimited: true };
   if (input.waId && await prisma.message.findUnique({ where: { waId: input.waId } })) return { duplicated: true };
   let inbound;
   try {
     inbound = await prisma.message.create({ data: {
       conversationId: input.conversation.id, waId: input.waId, direction: "INBOUND", phone: input.phone,
       whatsappUserId: input.whatsappUserId || null, contentType: spreadsheet ? "DOCUMENT" : "TEXT",
-      content: link ? "[Vinculación de Start List]" : content || "[Start List recibida]",
+      content: link ? "[Vinculación de Start List]" : access.redactConfirmation(content) || "[Start List recibida]",
       mediaFilename: spreadsheet ? input.media?.filename : null,
       timestamp: input.timestamp || now, aiMetadata: { source: "start_list_whatsapp", handled: true },
     } });
@@ -157,21 +168,28 @@ async function handleStartListInbound(input, dependencies = {}) {
     if (input.waId && error.code === "P2002") return { duplicated: true };
     throw error;
   }
+  async function requireActiveTimer() {
+    if (!registeredMode) return;
+    const current = await access.findActiveTimer(prisma, timer.phone);
+    if (!current || current.id !== timer.id) throw Object.assign(new Error("El cronometrador ya no está habilitado."), { code: "timer_not_active" });
+  }
   async function reply(text) {
+    try { await requireActiveTimer(); } catch { return { handled: true, denied: true }; }
     const body = text.slice(0, 3900);
+    const recordedBody = access.redactConfirmation(body);
     let sent;
     try { sent = await waba.sendTextMessage(input.whatsappUserId || input.phone, body); }
     catch { return { handled: true, conversationId: input.conversation.id, deliveryFailed: true }; }
     try {
       await prisma.message.create({ data: { conversationId: input.conversation.id, direction: "OUTBOUND", phone: input.phone,
-        whatsappUserId: input.whatsappUserId || null, content: body,
+        whatsappUserId: input.whatsappUserId || null, content: recordedBody,
         aiMetadata: { source: "start_list_whatsapp", inboundId: inbound.id, providerMessageId: sent?.messages?.[0]?.id || null } } });
     } catch {
       // The provider may already have delivered the reply. Do not send it twice
       // merely because local delivery bookkeeping failed.
-      return { handled: true, conversationId: input.conversation.id, reply: body, deliveryRecorded: false };
+      return { handled: true, conversationId: input.conversation.id, reply: recordedBody, deliveryRecorded: false };
     }
-    return { handled: true, conversationId: input.conversation.id, reply: body };
+    return { handled: true, conversationId: input.conversation.id, reply: recordedBody };
   }
 
   // Linking also participates in the sender lease. A second VINCULAR must not
@@ -222,6 +240,7 @@ async function handleStartListInbound(input, dependencies = {}) {
   let wroteCommit = false;
   try {
     if (link) {
+      await requireActiveTimer();
       const redeemed = await request("redeem", { body: { code: link[1].toUpperCase(), phone_hash: hash } });
       const expiration = new Date(redeemed.expires_at);
       if (typeof redeemed.batch_id !== "string" || !redeemed.batch_id || !Number.isFinite(expiration.getTime()) || expiration <= clock()) throw new Error("Vinculación inválida.");
@@ -234,6 +253,9 @@ async function handleStartListInbound(input, dependencies = {}) {
       await removeSession();
       return await reply("La vinculación expiró. Genera un nuevo código desde Start List en Timing para continuar con el mismo borrador.");
     }
+    if (new Date(session.pendingConfirmation?.lockedUntil).getTime() > clock().getTime()) {
+      return await reply("La confirmación quedó bloqueada por varios intentos inválidos. Espera cinco minutos y escribe ESTADO, o revisa el borrador desde Timing.");
+    }
     // Decryption belongs inside try/finally so a bad ciphertext cannot strand a
     // lease until its timeout. No token or participant value is ever logged.
     let token;
@@ -245,6 +267,7 @@ async function handleStartListInbound(input, dependencies = {}) {
     const channel = async (path, body, method = "POST") => {
       await renewLease();
       if (new Date(session.expiresAt) <= clock()) throw Object.assign(new Error("Vinculación expirada."), { response: { status: 401 } });
+      await requireActiveTimer();
       const result = await request(path, { token, phoneHash: hash, body, method });
       await renewLease();
       return result;
@@ -266,10 +289,14 @@ async function handleStartListInbound(input, dependencies = {}) {
         && keys.every(key => typeof key === "string" && authorized.has(key) && current.get(key)?.status === "ready"
           && candidates.has(key) && !blocked(candidates.get(key)));
       const expiration = new Date(confirmation?.expiresAt).getTime();
-      if (!confirmation || content.toUpperCase() !== confirmation.command || confirmation.batchId !== batch.id
+      if (!confirmation || !matchesConfirmation(content, confirmation.command) || confirmation.batchId !== batch.id
           || confirmation.version !== batch.version || !batch.preview_token || confirmation.previewToken !== batch.preview_token
           || !Number.isFinite(expiration) || expiration <= clock().getTime() || !validSelection
           || confirmation.selectionHash !== selectionHash(batch, keys)) {
+        const failedAttempts = Math.min(5, (Number(confirmation?.failedAttempts) || 0) + 1);
+        await writeSession({ pendingConfirmation: failedAttempts >= 5
+          ? { failedAttempts, lockedUntil: new Date(Math.min(clock().getTime() + 5 * 60000, new Date(session.expiresAt).getTime())).toISOString() }
+          : { ...confirmation, failedAttempts } });
         return await reply("La confirmación no corresponde a la propuesta vigente. Escribe ESTADO para revisar el resumen y obtener su comando actual.");
       }
       // Consume before the first write. If HTTP times out after materialization,
@@ -304,7 +331,7 @@ async function handleStartListInbound(input, dependencies = {}) {
       const currentAnalysis = preserveAttemptedAnalysis(reanalyze({ sourceWorkbook: previous.analysis.sourceWorkbook,
         plan: previous.analysis.plan, decisions: previous.decisions || {}, catalog }), previous.analysis, batch.rows);
       let answers;
-      try { answers = await resolve({ message: content, questions: currentAnalysis.questions || [], catalog }); }
+      try { answers = await resolve({ message: access.redactConfirmation(content), questions: currentAnalysis.questions || [], catalog }); }
       catch { answers = { answers: [], clarification: "No pude resolver esa respuesta de forma segura. Abre el borrador en Timing para seleccionar la opción." }; }
       await renewLease();
       const decisions = { ...previous.decisions };
@@ -318,7 +345,7 @@ async function handleStartListInbound(input, dependencies = {}) {
       for (const row of batch.rows.filter(row => row.attempted)) rows.set(row.row_key, { row_key: row.row_key, source_ref: row.source_ref, payload: row.payload });
       batch = await channel("batch", { expected_version: batch.version, rows: [...rows.values()], metadata: { start_list: {
         analysis: stored, decisions, catalog, messages: [...(previous.messages || []).slice(-46),
-          { id: `wa-user-${inbound.id}`, role: "user", content },
+          { id: `wa-user-${inbound.id}`, role: "user", content: access.redactConfirmation(content) },
           { id: `wa-agent-${inbound.id}`, role: "assistant", content: answers.clarification || "Actualicé las asignaciones de la propuesta." }],
       } } }, "PATCH");
     }
@@ -333,10 +360,14 @@ async function handleStartListInbound(input, dependencies = {}) {
     await writeSession({ pendingConfirmation: review.readyKeys.length ? {
       batchId: batch.id, version: batch.version, previewToken: batch.preview_token,
       rowKeys: review.readyKeys, command: review.command, selectionHash: selectionHash(batch, review.readyKeys),
-      expiresAt: new Date(expiry).toISOString(),
+      expiresAt: new Date(expiry).toISOString(), failedAttempts: 0,
     } : dbNull });
     return await reply(review.text);
   } catch (error) {
+    if (error.code === "timer_not_active") {
+      await removeSession().catch(() => {});
+      return { handled: true, denied: true };
+    }
     if (link) return await reply("No pude vincular ese código. Genera uno nuevo desde Start List en Timing y envía VINCULAR seguido del código.");
     if (error.code === "analysis_busy") return await reply("Hay otro archivo en análisis. Espera unos segundos y vuelve a enviar tu archivo. El borrador anterior sigue guardado.");
     const status = error.response?.status;
@@ -354,4 +385,4 @@ async function handleStartListInbound(input, dependencies = {}) {
   }
 }
 module.exports = { enabled, validMetaSignature, handleStartListInbound, channelRequest,
-  batchRows, renderReview, confirmationCommand, selectionHash, preserveAttemptedAnalysis, encryptToken, decryptToken, senderHash };
+  batchRows, renderReview, confirmationCommand, matchesConfirmation, selectionHash, preserveAttemptedAnalysis, encryptToken, decryptToken, senderHash };
