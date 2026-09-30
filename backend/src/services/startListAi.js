@@ -51,10 +51,12 @@ async function analyzeStartListPlan(context, options = {}) {
       "Usa los rangos firstRow/lastRow y referencias a columnas reales para que el programa lea todas las filas; nunca reconstruyas personas ni valores.",
       "Las hojas tienen índices desde 0. Filas y columnas empiezan en 1. Mantén por separado las cabeceras repetidas o títulos intermedios.",
       "Cada field debe tener exactamente un origen: column, contextCell o fromSheetName. No inventes constantes, fechas, géneros, nombres o categorías.",
+      "contextCell debe ser null cuando no se usa; si se usa, debe ser una dirección real como A1. Nunca envíes una cadena vacía.",
       "Mantén los nombres completos literalmente. Si dice apellidos y nombres no asumas un orden distinto ni dividas palabras por tu cuenta.",
       "No conviertas edad en fecha de nacimiento. No confundas dorsal con documento o chip.",
       "Si una columna es ambigua, no la asignes. Las preguntas posteriores permiten que el usuario elija una columna real.",
       "Solo propone excluir cabeceras repetidas, totales o notas. Las exclusiones serán verificadas por código antes de descartarse.",
+      "Las hojas de notas y resúmenes sin participantes no son bloques. Déjalas fuera del plan: se conservarán para revisión. No crees bloques vacíos de campos para cubrir todas las hojas.",
       "No propongas crear distancias, salidas ni categorías. Los catálogos sirven únicamente como contexto para interpretar nombres.",
     ].join("\n"),
     input: [{ role: "user", content: [{ type: "input_text", text: serialized }] }],
@@ -67,6 +69,26 @@ const AnswerSchema = z.object({
   answers: z.array(z.object({ questionId: z.string(), optionId: z.string() }).strict()).max(MAX_QUESTIONS),
   clarification: z.string().max(1000),
 }).strict();
+
+function summarizeAnswers(answers, questions) {
+  const labels = { distance: "Distancia", category: "Categoría", gender: "Género", start: "Salida", column: "Columna" };
+  const groups = new Map();
+  for (const answer of answers) {
+    const question = questions.find((item) => item.id === answer.questionId);
+    const option = question?.options.find((item) => item.id === answer.optionId);
+    if (!option) continue;
+    const label = question.type === "row"
+      ? answer.optionId === "row:exclude" ? "Excluir del listado" : "Conservar como participante"
+      : `${labels[question.type] || "Asignación"}${question.type === "column" && question.title ? ` (${question.title})` : ""}: ${option.label}`;
+    if (!groups.has(label)) groups.set(label, new Set());
+    const rowIds = question.rowIds || [];
+    rowIds.forEach((rowId) => groups.get(label).add(rowId));
+  }
+  if (!groups.size) return "No cambié la propuesta. Indica qué grupo quieres corregir y cuál de las opciones le corresponde.";
+  const descriptions = [...groups].slice(0, 6).map(([label, rowIds]) => `${label}${rowIds.size ? ` (${rowIds.size} ${rowIds.size === 1 ? "fila" : "filas"})` : ""}`);
+  const remaining = groups.size - descriptions.length;
+  return `Respuestas aplicadas: ${descriptions.join("; ")}${remaining ? `; y ${remaining} ajustes más` : ""}. Las demás filas conservan sus asignaciones. Revisa el resumen actualizado antes de importar.`;
+}
 
 async function resolveConversationAnswers({ message, questions, catalog, client, model, signal }) {
   const text = String(message || "").trim();
@@ -84,6 +106,7 @@ async function resolveConversationAnswers({ message, questions, catalog, client,
       sourceValue: question.sourceValue,
       resolved: question.resolved,
       selectedOptionId: question.selectedOptionId,
+      rowIds: question.rowIds || [],
       affectedRows: question.rowIds?.length || 0,
       options: (question.options || []).slice(0, MAX_OPTIONS).map((option) => ({ id: option.id, label: option.label })),
     })).filter((question) => question.options.length);
@@ -91,7 +114,8 @@ async function resolveConversationAnswers({ message, questions, catalog, client,
   const serialized = JSON.stringify({
     message: text,
     competitionId: catalog?.competitionId || null,
-    questions: available,
+    // Physical row IDs are only needed locally to summarize actual choices.
+    questions: available.map(({ rowIds: _rowIds, ...question }) => question),
   });
   if (Buffer.byteLength(serialized) > MAX_CONTEXT_BYTES) throw new StartListAnalysisError("ai_context_too_large", "Hay demasiadas opciones. Resuelve primero un grupo en la tabla.");
   const schema = {
@@ -127,7 +151,10 @@ async function resolveConversationAnswers({ message, questions, catalog, client,
     }
     deduplicated.set(answer.questionId, answer);
   }
-  return { answers: [...deduplicated.values()], clarification: proposed.clarification };
+  const answers = [...deduplicated.values()];
+  // The model selects existing choices; its prose is not evidence of what was
+  // changed. This shared summary is used by both Timing and WhatsApp.
+  return { answers, clarification: summarizeAnswers(answers, available) };
 }
 
 module.exports = { analyzeStartListPlan, resolveConversationAnswers, parseStructuredResponse, AI_TIMEOUT_MS };

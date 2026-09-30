@@ -154,7 +154,7 @@ function buildAnalysis(parsed, catalog, proposedPlan, decisions = {}, analysisIs
   const excludedRows = [];
   const candidates = [];
 
-  function question(type, scope, sourceValue, rowIds, options, { required = true, selected = null, field = null, title = null } = {}) {
+  function question(type, scope, sourceValue, rowIds, options, { required = true, selected = null, field = null, title = null, sourceLabel = null } = {}) {
     const id = makeQuestionId(type, scope, normalizeLabel(sourceValue));
     const requested = decisionValue(decisions, id);
     const answer = requested == null ? null : options.find((option) => option.id === String(requested));
@@ -166,7 +166,7 @@ function buildAnalysis(parsed, catalog, proposedPlan, decisions = {}, analysisIs
     }
     const selection = answer || (requested == null ? selected : null);
     if (!questions.has(id)) {
-      questions.set(id, { id, type, field, title, sourceValue: String(sourceValue || ""), rowIds: [], options, required, resolved: Boolean(selection), selectedOptionId: selection?.id || null });
+      questions.set(id, { id, type, field, title, sourceValue: String(sourceLabel ?? sourceValue ?? ""), rowIds: [], options, required, resolved: Boolean(selection), selectedOptionId: selection?.id || null });
     }
     const result = questions.get(id);
     result.rowIds.push(...rowIds.filter((id) => !result.rowIds.includes(id)));
@@ -182,7 +182,7 @@ function buildAnalysis(parsed, catalog, proposedPlan, decisions = {}, analysisIs
     return question("row", parsed.file.sha256, row.id, [row.id], [
       { id: "row:keep", label: "Conservar como participante y revisar columnas" },
       { id: "row:exclude", label: "Excluir esta fila del listado" },
-    ], { required, title: `Revisar ${row.sheetName} · fila ${row.row}` });
+    ], { required, title: `Revisar ${row.sheetName} · fila ${row.row}`, sourceLabel: `${row.sheetName} · fila ${row.row}` });
   }
 
   // A row explicitly retained outside a guessed block gets its own editable
@@ -191,14 +191,14 @@ function buildAnalysis(parsed, catalog, proposedPlan, decisions = {}, analysisIs
     const inBlock = plan.blocks.some((block) => block.sheetIndex === row.sheetIndex && row.row >= block.firstRow && row.row <= block.lastRow);
     const rowQuestionId = makeQuestionId("row", parsed.file.sha256, normalizeLabel(row.id));
     if (!inBlock && decisionValue(decisions, rowQuestionId) === "row:keep") {
-      plan.blocks.push({ sheetIndex: row.sheetIndex, headerRow: null, firstRow: row.row, lastRow: row.row, fields: [], excludeRows: [] });
+      plan.blocks.push({ sheetIndex: row.sheetIndex, headerRow: null, firstRow: row.row, lastRow: row.row, reviewScope: "individual", fields: [], excludeRows: [] });
     }
   }
 
   for (const block of plan.blocks) {
     const sheet = parsed.workbook.sheets[block.sheetIndex];
     const blockKey = `${block.sheetIndex}:${block.firstRow}:${block.lastRow}`;
-    const rows = parsed.sourceRows.filter((row) => row.sheetIndex === block.sheetIndex && row.row >= block.firstRow && row.row <= block.lastRow);
+    const blockRows = parsed.sourceRows.filter((row) => row.sheetIndex === block.sheetIndex && row.row >= block.firstRow && row.row <= block.lastRow);
     const header = block.headerRow ? rowLookup.get(`${block.sheetIndex}:${block.headerRow}`) : null;
     const keepHeader = header && decisionValue(decisions, makeQuestionId("row", parsed.file.sha256, normalizeLabel(header.id))) === "row:keep";
     if (header && !consumed.has(header.id) && !keepHeader) {
@@ -208,6 +208,35 @@ function buildAnalysis(parsed, catalog, proposedPlan, decisions = {}, analysisIs
         excludedRows.push({ id: header.id, source: { sheetIndex: header.sheetIndex, sheetName: header.sheetName, row: header.row }, reason: "header", confirmed: true });
       }
     }
+    // Resolve inclusion before asking about columns or race assignments. A
+    // removed notes block must not leave a required, zero-participant question.
+    let rows = blockRows.filter((row) => {
+      const rowQuestionId = makeQuestionId("row", parsed.file.sha256, normalizeLabel(row.id));
+      const decision = decisionValue(decisions, rowQuestionId);
+      const reason = decision === "row:exclude" ? "user_excluded"
+        : decision === "row:keep" ? null
+          : isHeaderRow(row) ? "repeated_header" : null;
+      if (!reason) return true;
+      consumed.add(row.id);
+      if (reason === "user_excluded") rowReview(row);
+      excludedRows.push({ id: row.id, source: { sheetIndex: row.sheetIndex, sheetName: row.sheetName, row: row.row }, reason, confirmed: true });
+      return false;
+    });
+    if (!header && !block.fields.length) {
+      if (!block.reviewScope) {
+        // Preserve a legacy table that the user had already mapped manually.
+        // Store this once: a later per-row keep/map/exclude sequence must not
+        // turn unrelated rows into participants just because a mapping exists.
+        const hasLegacyNameMapping = ["fullName", "firstName"].some((field) => {
+          const questionId = makeQuestionId("column", [parsed.file.sha256, blockKey, field], normalizeLabel(field));
+          const choice = /^column:([1-9]\d*)$/.exec(String(decisionValue(decisions, questionId) || ""));
+          return choice && Number.isSafeInteger(Number(choice[1])) && Number(choice[1]) <= sheet.columnCount;
+        });
+        block.reviewScope = hasLegacyNameMapping ? "legacy_mapped" : "individual";
+      }
+      if (block.reviewScope === "individual") rows = rows.filter((row) => decisionValue(decisions, makeQuestionId("row", parsed.file.sha256, normalizeLabel(row.id))) === "row:keep");
+    }
+    if (!rows.length) continue;
     const fields = new Map(block.fields.map((field) => [field.field, { ...field }]));
     for (const field of START_LIST_FIELDS) {
       const original = fields.get(field);
@@ -222,7 +251,7 @@ function buildAnalysis(parsed, catalog, proposedPlan, decisions = {}, analysisIs
       if (["distance", "category", "start", "gender", "club"].includes(field)) options.push({ id: "sheet_name", label: `Usar nombre de hoja: ${sheet.name}`, fromSheetName: true });
       const defaultId = original?.column != null ? `column:${original.column}` : original?.contextCell ? `cell:${original.contextCell}` : original?.fromSheetName ? "sheet_name" : "unmapped";
       const selected = options.find((option) => option.id === defaultId);
-      const result = question("column", [parsed.file.sha256, blockKey, field], field, [], options, { required, selected: required ? null : selected, field, title: `Columna para ${FIELD_LABELS[field]} · ${sheet.name}` });
+      const result = question("column", [parsed.file.sha256, blockKey, field], field, rows.map((row) => row.id), options, { required, selected: required ? null : selected, field, title: `Columna para ${FIELD_LABELS[field]} · ${sheet.name}` });
       if (result.selection && result.selection.id !== "unmapped") fields.set(field, { field, column: result.selection.column || null, contextCell: result.selection.contextCell || null, fromSheetName: Boolean(result.selection.fromSheetName) });
       else fields.delete(field);
     }
@@ -230,16 +259,7 @@ function buildAnalysis(parsed, catalog, proposedPlan, decisions = {}, analysisIs
     for (const row of rows) {
       consumed.add(row.id);
       const rowQuestionId = makeQuestionId("row", parsed.file.sha256, normalizeLabel(row.id));
-      if (decisionValue(decisions, rowQuestionId) === "row:exclude") {
-        rowReview(row);
-        excludedRows.push({ id: row.id, source: { sheetIndex: row.sheetIndex, sheetName: row.sheetName, row: row.row }, reason: "user_excluded", confirmed: true });
-        continue;
-      }
       const keepRow = decisionValue(decisions, rowQuestionId) === "row:keep";
-      if (!keepRow && isHeaderRow(row)) {
-        excludedRows.push({ id: row.id, source: { sheetIndex: row.sheetIndex, sheetName: row.sheetName, row: row.row }, reason: "repeated_header", confirmed: true });
-        continue;
-      }
       if (!keepRow && isSafeTotalRow(row, mappings)) {
         excludedRows.push({ id: row.id, source: { sheetIndex: row.sheetIndex, sheetName: row.sheetName, row: row.row }, reason: "total", confirmed: true });
         continue;
@@ -381,6 +401,19 @@ function buildAnalysis(parsed, catalog, proposedPlan, decisions = {}, analysisIs
     candidate.status = candidate.issues.some((item) => item.severity === "error") ? "pending" : candidate.needsServerClassification ? "needs_classification" : "ready";
     if (candidate.status === "pending") rowReview(rowLookup.get(`${candidate.source.sheetIndex}:${candidate.source.row}`), false);
   }
+  const participantIds = new Set(candidates.map((candidate) => candidate.id));
+  for (const [id, item] of questions) {
+    if (item.type === "row") continue;
+    item.rowIds = item.rowIds.filter((rowId) => participantIds.has(rowId));
+    if (!item.rowIds.length) questions.delete(id);
+    else if (item.type === "column" && item.resolved) {
+      // Keep editable mappings without repeating every physical ID fourteen
+      // times in stored metadata and subsequent /resolve requests. Questions
+      // that need a choice retain their exact affected rows.
+      item.affectedRows = item.rowIds.length;
+      item.rowIds = [];
+    }
+  }
   const pending = candidates.filter((candidate) => candidate.status === "pending").length;
   return {
     version: 1, file: parsed.file, workbook: parsed.workbook, sourceWorkbook: parsed,
@@ -400,6 +433,20 @@ function buildAnalysis(parsed, catalog, proposedPlan, decisions = {}, analysisIs
 // Reject instead of retaining uploaded files in an unbounded waiting queue.
 let analysisActive = false;
 
+function safeAnalysisDiagnostic(error) {
+  const knownCodes = new Set([
+    "ai_unavailable", "ai_incomplete", "ai_refusal", "invalid_ai_response", "ai_context_too_large",
+    "invalid_plan", "invalid_plan_range", "invalid_plan_header", "duplicate_field_mapping",
+    "invalid_field_mapping", "invalid_context_mapping", "missing_context_cell",
+    "overlapping_plan_blocks", "invalid_excluded_row",
+  ]);
+  if (knownCodes.has(error?.code)) return error.code;
+  if (["APIConnectionTimeoutError", "TimeoutError", "AbortError"].includes(error?.name)) return "ai_timeout";
+  if (error?.status === 429) return "ai_rate_limited";
+  // Never return provider messages, uploaded values, credentials or raw bodies.
+  return "ai_provider_error";
+}
+
 async function analyzeStartList({ buffer, mimeType, filename, catalog, decisions = {}, planAnalyzer = null }) {
   if (analysisActive) throw new StartListAnalysisError("analysis_busy", "Hay otro archivo en análisis. Espera unos segundos y vuelve a intentarlo.");
   analysisActive = true;
@@ -412,8 +459,8 @@ async function analyzeStartList({ buffer, mimeType, filename, catalog, decisions
       try {
         const proposed = await planAnalyzer(buildStartListAnalysisContext(parsed, catalog));
         plan = validateStartListPlan(proposed, parsed);
-      } catch {
-        issues.push({ code: "ai_plan_unavailable", severity: "warning", message: "No se pudo validar la propuesta de IA. Revisa las columnas detectadas y las filas pendientes." });
+      } catch (error) {
+        issues.push({ code: "ai_plan_unavailable", severity: "warning", diagnosticCode: safeAnalysisDiagnostic(error), message: "La IA no completó la lectura del archivo. Usé las columnas reconocidas y separé las filas sin identificar para que puedas revisarlas." });
       }
     }
     return buildAnalysis(parsed, catalog, plan, decisions, issues);

@@ -2,8 +2,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const XLSX = require("xlsx");
 const { parseStartListWorkbook, spreadsheetKind, START_LIST_LIMITS } = require("./startListWorkbook");
-const { analyzeStartList, reanalyzeStartList, normalizeBirthDate, distanceKey } = require("./startListAnalysis");
-const { inferStartListPlan, validateStartListPlan, buildStartListAnalysisContext } = require("./startListPlan");
+const { analyzeStartList, reanalyzeStartList, normalizeBirthDate, distanceKey, makeQuestionId } = require("./startListAnalysis");
+const { inferStartListPlan, validateStartListPlan, buildStartListAnalysisContext, normalizeLabel, StartListPlanJsonSchema } = require("./startListPlan");
 
 function workbook(sheets, { date1904 = false, bookType = "xlsx", customize } = {}) {
   const book = XLSX.utils.book_new();
@@ -59,6 +59,154 @@ test("analysis errors and provider fallback release the shared permit for a late
   const fallback = await analyzeStartList({ ...input, planAnalyzer: async () => { throw new Error("synthetic provider failure"); } });
   assert.ok(fallback.issues.some(issue => issue.code === "ai_plan_unavailable"));
   assert.equal((await analyzeStartList(input)).candidates.length, 1);
+});
+
+test("fallback separates notes from six participants without losing a single source row", async () => {
+  const rows = Array.from({ length: 6 }, (_, index) => [`Prueba ${index + 1}`, String(index + 1), index % 2 ? "F" : "M", index < 4 ? ["2.5K", "2.5k", "2.5 km", "2,5 km"][index] : ["5K / 10K", "Ruta inexistente"][index - 4], "Libre", `QA-${index + 1}`, index === 3 ? "" : "1990-01-15"]);
+  const buffer = workbook({
+    "Listado de prueba": [["Listado de prueba"], [], [], ordinaryHeader, ...rows],
+    "Notas y totales": [["Notas de prueba"], [], ["Contenido", "Datos totalmente ficticios"], ["Total de filas en el listado", 6], ["Esta hoja", "No contiene participantes"]],
+  });
+  const result = await analyzeStartList({ buffer, filename: "prueba.xlsx", catalog: catalog({ name: "2.5K" }), planAnalyzer: async () => { throw new Error("provider response must stay private"); } });
+  assert.equal(result.candidates.length, 6);
+  assert.equal(result.summary.ready, 4);
+  assert.equal(result.summary.pending, 2);
+  assert.equal(result.unassignedRows.length, 5);
+  assert.equal(result.excludedRows.length, 1);
+  assert.equal(result.summary.sourceRows, 12);
+  assert.equal(result.summary.balanced, true);
+  assert.ok(result.questions.filter((question) => question.type === "column").every((question) => question.resolved && question.affectedRows === 6 && question.rowIds.length === 0));
+  assert.ok(!result.questions.some((question) => question.type === "column" && question.title.includes("Notas y totales")));
+  assert.ok(result.questions.filter((question) => question.type === "row").every((question) => !question.sourceValue.includes(result.file.sha256)));
+  assert.equal(result.issues[0].diagnosticCode, "ai_provider_error");
+  assert.ok(!JSON.stringify(result.issues).includes("provider response"));
+
+  const decisions = Object.fromEntries(result.questions.filter((question) => question.type === "row" && question.sourceValue.startsWith("Notas y totales")).map((question) => [question.id, "row:exclude"]));
+  const revised = reanalyzeStartList({ sourceWorkbook: result.sourceWorkbook, plan: result.plan, decisions, catalog: catalog({ name: "2.5K" }) });
+  assert.equal(revised.candidates.length, 6);
+  assert.equal(revised.unassignedRows.length, 1);
+  assert.ok(!revised.questions.some((question) => !question.resolved && question.type !== "row" && question.rowIds.length === 0));
+});
+
+test("saved empty-field fallback blocks stay reviewable instead of becoming unnamed participants", async () => {
+  const buffer = workbook({ Lista: [ordinaryHeader, ordinaryRow], Notas: [["Nota de organización"], ["Contenido", "Observaciones"]] });
+  const result = await analyzeStartList({ buffer, filename: "lista.xlsx", catalog: catalog() });
+  const oldPlan = structuredClone(result.plan);
+  oldPlan.blocks.push({ sheetIndex: 1, headerRow: null, firstRow: 1, lastRow: 2, fields: [], excludeRows: [] });
+  const revised = reanalyzeStartList({ sourceWorkbook: result.sourceWorkbook, plan: oldPlan, catalog: catalog() });
+  assert.equal(revised.candidates.length, 1);
+  assert.equal(revised.unassignedRows.length, 2);
+  assert.equal(revised.summary.balanced, true);
+  const decisions = Object.fromEntries(revised.questions.filter((question) => question.type === "row").map((question) => [question.id, "row:exclude"]));
+  const excluded = reanalyzeStartList({ sourceWorkbook: result.sourceWorkbook, plan: oldPlan, decisions, catalog: catalog() });
+  assert.ok(!excluded.questions.some((question) => question.type === "column" && question.title.includes("Notas")));
+  assert.equal(excluded.summary.balanced, true);
+});
+
+test("keeping one row of an old unknown block never includes neighbouring notes", async () => {
+  const buffer = workbook({ Lista: [["Ana", "F"], ["Nota de organización", "Pendiente"]] });
+  const sourceWorkbook = parseStartListWorkbook({ buffer, filename: "lista.xlsx" });
+  const oldPlan = { version: 1, blocks: [{ sheetIndex: 0, headerRow: null, firstRow: 1, lastRow: 2, fields: [], excludeRows: [] }] };
+  const initial = reanalyzeStartList({ sourceWorkbook, plan: oldPlan, catalog: catalog() });
+  const first = initial.questions.find((question) => question.type === "row" && question.sourceValue.endsWith("fila 1"));
+  const decisions = { [first.id]: "row:keep" };
+  assert.equal(initial.plan.blocks[0].reviewScope, "individual");
+  const kept = reanalyzeStartList({ sourceWorkbook, plan: JSON.parse(JSON.stringify(initial.plan)), decisions, catalog: catalog() });
+  assert.equal(kept.candidates.length, 1);
+  assert.equal(kept.unassignedRows.length, 1);
+  decisions[kept.questions.find((question) => question.type === "column" && question.field === "fullName").id] = "column:1";
+  const mapped = reanalyzeStartList({ sourceWorkbook, plan: JSON.parse(JSON.stringify(kept.plan)), decisions, catalog: catalog() });
+  assert.equal(mapped.candidates.length, 1);
+  assert.equal(mapped.candidates[0].values.fullName, "Ana");
+  assert.equal(mapped.unassignedRows.length, 1);
+  decisions[first.id] = "row:exclude";
+  const removed = reanalyzeStartList({ sourceWorkbook, plan: JSON.parse(JSON.stringify(mapped.plan)), decisions, catalog: catalog() });
+  assert.equal(removed.candidates.length, 0);
+  assert.equal(removed.unassignedRows.length, 1);
+  assert.equal(removed.summary.balanced, true);
+  assert.equal(removed.plan.blocks[0].reviewScope, "individual");
+});
+
+test("legacy manually named blocks preserve their scope and earlier exclusions across later decisions", () => {
+  const buffer = workbook({ Lista: [["Ana", "F"], ["Luis", "M"], ["Nota de organización", "Pendiente"]] });
+  const sourceWorkbook = parseStartListWorkbook({ buffer, filename: "lista.xlsx" });
+  const plan = { version: 1, blocks: [{ sheetIndex: 0, headerRow: null, firstRow: 1, lastRow: 3, fields: [], excludeRows: [] }] };
+  const scope = [sourceWorkbook.file.sha256, "0:1:3"];
+  const excludedId = makeQuestionId("row", sourceWorkbook.file.sha256, normalizeLabel(sourceWorkbook.sourceRows[2].id));
+  const keptId = makeQuestionId("row", sourceWorkbook.file.sha256, normalizeLabel(sourceWorkbook.sourceRows[0].id));
+  for (const field of ["fullName", "firstName"]) {
+    const nameId = makeQuestionId("column", [...scope, field], normalizeLabel(field));
+    const genderId = makeQuestionId("column", [...scope, "gender"], normalizeLabel("gender"));
+    const decisions = { [nameId]: "column:1", [genderId]: "column:2", [excludedId]: "row:exclude" };
+    const initial = reanalyzeStartList({ sourceWorkbook, plan, decisions, catalog: catalog() });
+    assert.equal(initial.plan.blocks[0].reviewScope, "legacy_mapped");
+    assert.equal(initial.candidates.length, 2);
+    assert.equal(initial.unassignedRows.length, 0);
+    assert.deepEqual(initial.candidates.map((row) => row.values[field]), ["Ana", "Luis"]);
+    assert.ok(initial.candidates.every((row) => row.status === "ready"));
+    const revised = reanalyzeStartList({ sourceWorkbook, plan: JSON.parse(JSON.stringify(initial.plan)), decisions: { ...decisions, [keptId]: "row:keep" }, catalog: catalog() });
+    assert.equal(revised.candidates.length, 2, "conserving one row must not drop the rest of an already mapped legacy list");
+    assert.equal(revised.excludedRows.length, 1);
+    assert.equal(revised.summary.balanced, true);
+    const cleared = reanalyzeStartList({ sourceWorkbook, plan: JSON.parse(JSON.stringify(revised.plan)), decisions: { ...decisions, [nameId]: "unmapped" }, catalog: catalog() });
+    assert.equal(cleared.plan.blocks[0].reviewScope, "legacy_mapped");
+    assert.equal(cleared.candidates.length, 2, "an explicit mapping correction keeps the original reviewed scope");
+    assert.equal(cleared.excludedRows.length, 1);
+  }
+});
+
+test("only valid legacy name mappings activate the old table scope and its marker round-trips locally", () => {
+  const buffer = workbook({ Lista: [["Ana", "F"], ["Nota", "Pendiente"]] });
+  const sourceWorkbook = parseStartListWorkbook({ buffer, filename: "lista.xlsx" });
+  const plan = { version: 1, blocks: [{ sheetIndex: 0, headerRow: null, firstRow: 1, lastRow: 2, fields: [], excludeRows: [] }] };
+  for (const [field, option] of [["fullName", "column:3"], ["firstName", "column:0"], ["gender", "column:2"], ["lastName", "column:1"]]) {
+    const questionId = makeQuestionId("column", [sourceWorkbook.file.sha256, "0:1:2", field], normalizeLabel(field));
+    const result = reanalyzeStartList({ sourceWorkbook, plan, decisions: { [questionId]: option }, catalog: catalog() });
+    assert.equal(result.plan.blocks[0].reviewScope, "individual");
+    assert.equal(result.candidates.length, 0);
+    assert.deepEqual(validateStartListPlan(JSON.parse(JSON.stringify(result.plan)), sourceWorkbook), result.plan);
+  }
+  const invalid = structuredClone(plan);
+  invalid.blocks[0].reviewScope = "all_rows";
+  assert.throws(() => validateStartListPlan(invalid, sourceWorkbook), { code: "invalid_plan" });
+  assert.equal(StartListPlanJsonSchema.properties.blocks.items.properties.reviewScope, undefined, "the provider never chooses persisted compatibility state");
+});
+
+test("unrecognized headerless participant rows require review and can be mapped explicitly", async () => {
+  const buffer = workbook({ Lista: [["Ana Pérez", "F", "10K", "Libre"]] });
+  const initial = await analyzeStartList({ buffer, filename: "lista.xlsx", catalog: catalog() });
+  assert.equal(initial.candidates.length, 0);
+  assert.equal(initial.unassignedRows.length, 1);
+  const review = initial.questions.find((question) => question.type === "row");
+  const decisions = { [review.id]: "row:keep" };
+  const kept = reanalyzeStartList({ sourceWorkbook: initial.sourceWorkbook, plan: initial.plan, decisions, catalog: catalog() });
+  const columns = { fullName: 1, gender: 2, distance: 3, category: 4 };
+  for (const [field, column] of Object.entries(columns)) decisions[kept.questions.find((question) => question.type === "column" && question.field === field).id] = `column:${column}`;
+  const mapped = reanalyzeStartList({ sourceWorkbook: initial.sourceWorkbook, plan: kept.plan, decisions, catalog: catalog() });
+  assert.equal(mapped.candidates[0].values.fullName, "Ana Pérez");
+  assert.equal(mapped.candidates[0].status, "ready");
+  assert.equal(mapped.summary.balanced, true);
+  assert.equal(mapped.candidates[0].id, initial.unassignedRows[0].id);
+});
+
+test("excluding all participants in a block removes its column and assignment questions", async () => {
+  const buffer = workbook({ Lista: [["Nombre", "Nombre", "Dorsal", "Sexo"], ["Ana", "Pérez", "1", "F"]] });
+  const initial = await analyzeStartList({ buffer, filename: "lista.xlsx", catalog: catalog() });
+  assert.equal(initial.questions.find((question) => question.type === "column" && !question.resolved).rowIds.length, 1);
+  const question = initial.questions.find((question) => question.type === "row");
+  const excluded = reanalyzeStartList({ sourceWorkbook: initial.sourceWorkbook, plan: initial.plan, decisions: { [question.id]: "row:exclude" }, catalog: catalog() });
+  assert.equal(excluded.candidates.length, 0);
+  assert.ok(excluded.questions.every((question) => question.type === "row" && question.resolved));
+  assert.equal(excluded.summary.balanced, true);
+});
+
+test("degraded analysis records only safe diagnostic codes for structural and timeout failures", async () => {
+  const input = { buffer: workbook({ Lista: [ordinaryHeader, ordinaryRow] }), filename: "lista.xlsx", catalog: catalog() };
+  const invalid = await analyzeStartList({ ...input, planAnalyzer: async () => ({ version: 1, blocks: [{ private: "source data" }] }) });
+  assert.equal(invalid.issues[0].diagnosticCode, "invalid_plan");
+  const timeout = await analyzeStartList({ ...input, planAnalyzer: async () => { const error = new Error("private provider token"); error.name = "APIConnectionTimeoutError"; throw error; } });
+  assert.equal(timeout.issues[0].diagnosticCode, "ai_timeout");
+  assert.ok(!JSON.stringify(timeout.issues).includes("private provider token"));
 });
 
 test("reads every sheet and keeps physical row/cell identities without losing duplicate headers", async () => {
@@ -221,6 +369,15 @@ test("AI sees relevant unknown headers, titles and samples across blocks, not pe
   assert.ok(!serialized.includes("1990-12-25"));
   assert.ok(!serialized.includes("000123456"));
   assert.ok(!serialized.includes("Ana Pérez"));
+});
+
+test("AI context preserves structural note labels below a probable header without exposing unrelated text", () => {
+  const buffer = workbook({ Notas: [["Notas de prueba"], [], ["Contenido", "Datos totalmente ficticios"], ["Total de filas en el listado", 6], ["Esta hoja", "No contiene participantes"], ["Contacto", "ana.private@example.org"]] });
+  const parsed = parseStartListWorkbook({ buffer, filename: "lista.xlsx" });
+  const serialized = JSON.stringify(buildStartListAnalysisContext(parsed, catalog()));
+  assert.ok(serialized.includes("Total de filas en el listado"));
+  assert.ok(serialized.includes("No contiene participantes"));
+  assert.ok(!serialized.includes("ana.private@example.org"));
 });
 
 test("the full data range is applied deterministically beyond the AI sample", async () => {
