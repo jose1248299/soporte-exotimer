@@ -1,6 +1,6 @@
 const axios = require("axios");
 const config = require("../config");
-const { normalizeWhatsappRecipient } = require("../utils/whatsapp");
+const { normalizeWhatsappRecipient, isWhatsappUserId } = require("../utils/whatsapp");
 
 const apiUrl = `https://graph.facebook.com/${config.meta.graphVersion}`;
 
@@ -20,6 +20,7 @@ async function postMessage(payload) {
     `${apiUrl}/${config.meta.phoneNumberId}/messages`,
     payload,
     {
+      timeout: 30000,
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${config.meta.accessToken}`,
@@ -27,6 +28,11 @@ async function postMessage(payload) {
     }
   );
 
+  if (!data?.messages?.[0]?.id) {
+    const error = new Error("Meta no devolvio un identificador de mensaje; entrega desconocida.");
+    error.deliveryUnknown = true;
+    throw error;
+  }
   return data;
 }
 
@@ -35,14 +41,14 @@ function recipientAddress(to) {
   if (!recipient) {
     throw new Error("Destinatario de WhatsApp invalido.");
   }
-  return recipient;
+  return isWhatsappUserId(recipient) ? { recipient } : { to: recipient };
 }
 
 async function sendTextMessage(to, body) {
   return postMessage({
     messaging_product: "whatsapp",
     recipient_type: "individual",
-    to: recipientAddress(to),
+    ...recipientAddress(to),
     type: "text",
     text: {
       preview_url: false,
@@ -55,7 +61,7 @@ async function sendImageMessage(to, link, caption) {
   return postMessage({
     messaging_product: "whatsapp",
     recipient_type: "individual",
-    to: recipientAddress(to),
+    ...recipientAddress(to),
     type: "image",
     image: {
       link,
@@ -68,7 +74,7 @@ async function sendDocumentMessage(to, link, caption, filename = "confirmacion-i
   return postMessage({
     messaging_product: "whatsapp",
     recipient_type: "individual",
-    to: recipientAddress(to),
+    ...recipientAddress(to),
     type: "document",
     document: {
       link,

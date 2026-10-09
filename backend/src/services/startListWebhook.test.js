@@ -65,10 +65,11 @@ test("feature off preserves the legacy webhook behavior", async () => {
   process.env.START_LIST_WHATSAPP_ENABLED = "false";
   processed.length = 0;
   await serve(async url => {
-    const response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: payload });
+    const signature = `sha256=${crypto.createHmac("sha256", process.env.META_APP_SECRET).update(payload).digest("hex")}`;
+    const response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", "X-Hub-Signature-256": signature }, body: payload });
     assert.equal(response.status, 200);
     assert.equal(processed.length, 1);
-    assert.equal(processed[0].startListVerified, false);
+    assert.equal(processed[0].startListVerified, true);
   });
 });
 
@@ -87,6 +88,7 @@ async function withRegisteredMode(run) {
 function registeredPayload(phone, options = {}) {
   const value = JSON.parse(payload).entry[0].changes[0].value;
   value.messages[0].from = phone;
+  value.contacts[0].wa_id = phone;
   Object.assign(value.messages[0], options);
   return { object: "whatsapp_business_account", entry: [{ changes: [{ value }] }] };
 }

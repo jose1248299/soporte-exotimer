@@ -603,6 +603,14 @@ button {
   white-space: nowrap;
 }
 
+.message time { display: flex; justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: 6px; }
+
+.message-delivery { display: inline-flex; align-items: center; gap: 4px; }
+.message-delivery svg { flex-shrink: 0; }
+.delivery-retry { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; border: 1px solid currentColor; border-radius: 4px; background: transparent; color: inherit; cursor: pointer; }
+.delivery-read { color: #b6e9ff; }
+.delivery-failed, .delivery-unknown, .delivery-expired { color: #ffe2b6; }
+
 .conversation-subtitle {
   overflow: hidden;
   color: #526071;

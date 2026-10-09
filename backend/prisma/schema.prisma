@@ -105,6 +105,7 @@ model Conversation {
   messages Message[]
   actions  SupportAction[]
   cases    SupportCase[]
+  replyJob ConversationReplyJob?
 
   @@unique([channel, phone])
   @@unique([channel, whatsappUserId])
@@ -161,6 +162,12 @@ model Message {
   mediaAnalysis  Json?
   rawPayload     Json?
   aiMetadata     Json?
+  providerMessageId String? @unique
+  deliveryStatus String?
+  deliveryError Json?
+  sendAttempts Int @default(0)
+  nextSendAt DateTime?
+  sendLeaseUntil DateTime?
   timestamp      DateTime         @default(now())
   createdAt      DateTime         @default(now())
 
@@ -172,6 +179,32 @@ model Message {
   @@index([competitionId, timestamp])
   @@index([phone])
   @@index([whatsappUserId])
+  @@index([deliveryStatus, nextSendAt])
+}
+
+model WhatsappDelivery {
+  providerMessageId String @id
+  sentAt DateTime?
+  deliveredAt DateTime?
+  readAt DateTime?
+  failedAt DateTime?
+  errors Json?
+  updatedAt DateTime @updatedAt
+}
+
+model ConversationReplyJob {
+  conversationId Int @id
+  revision Int @default(1)
+  dueAt DateTime
+  leaseUntil DateTime?
+  leaseToken String?
+  attempts Int @default(0)
+  lastError String?
+  state String @default("PENDING")
+  updatedAt DateTime @updatedAt
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([state, dueAt])
 }
 
 model SupportAction {

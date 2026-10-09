@@ -12,7 +12,9 @@ const { executeAction, requiresConfirmation } = require("./exotimerClient");
 const { getPolicy } = require("./supportPolicies");
 const { sendNewMessageNotification } = require("./pushNotifications");
 const { findOrCreateSupportCase, pickCompetitionId } = require("./supportCases");
-const { downloadMedia, sendTextMessage } = require("./waba");
+const { downloadMedia } = require("./waba");
+const outbox = require("./whatsappOutbox");
+const replyJobs = require("./replyJobs");
 const { normalizeDorsalReferences } = require("../utils/dorsal");
 const { isVideoFinishEvidence } = require("../utils/videoFinish");
 const { canonicalizeResultInput, compactAction, applyAthleteReviewPolicy, requestedChangeAlreadySatisfied } = require("./athleteReview");
@@ -25,7 +27,6 @@ const {
   whatsappConversationRecipient,
 } = require("../utils/whatsapp");
 
-const replyDebounceTimers = new Map();
 const runningConversationReplies = new Map();
 const processorStartedAt = new Date();
 
@@ -1309,25 +1310,8 @@ async function findPendingInboundMessages(conversationId) {
   return pending;
 }
 
-function scheduleConversationProcessing(conversationId, retry = 0) {
-  const previous = replyDebounceTimers.get(conversationId);
-  if (previous) clearTimeout(previous);
-
-  const waitMs = retry ? Math.min(120000, 30000 * retry) : Math.max(0, Number(config.support.replyDebounceMs || 8000));
-  const timer = setTimeout(() => {
-    replyDebounceTimers.delete(conversationId);
-    if (runningConversationReplies.has(conversationId)) {
-      scheduleConversationProcessing(conversationId, retry);
-      return;
-    }
-    processConversationReply(conversationId).catch((error) => {
-      console.error(`Error procesando conversacion ${conversationId} tras debounce:`, error.message);
-      if (retry < 3) scheduleConversationProcessing(conversationId, retry + 1);
-    });
-  }, waitMs);
-
-  if (typeof timer.unref === "function") timer.unref();
-  replyDebounceTimers.set(conversationId, timer);
+function scheduleConversationProcessing(conversationId) {
+  return replyJobs.enqueue(conversationId);
 }
 
 async function processInboundText(args) {
@@ -1800,44 +1784,39 @@ async function runConversationReply(conversationId, { replay, preview, sendReply
   });
   reply = sanitizeExternalReply(reply, conversation.channel);
 
-  let sent = null;
-  if (isWhatsapp && sendReply) {
-    try {
-      sent = await sendTextMessage(
-        whatsappConversationRecipient(conversation),
-        reply
-      );
-    } catch (error) {
-      throw new Error(`No se pudo enviar respuesta WhatsApp: ${error.message}`);
-    }
-  }
-
-  if (sendReply) await prisma.message.create({
-    data: {
-      conversationId: conversation.id,
-      supportCaseId: supportCase?.id || null,
-      competitionId: competitionId || null,
-      direction: "OUTBOUND",
-      phone: conversation.phone,
-      whatsappUserId: conversation.whatsappUserId || null,
-      content: reply,
-      aiMetadata: {
-        classification,
-        actionResult,
-        actionError,
-        actionPending,
-        contextActionResult,
-        contextActionError,
-        source: isExotimer ? "exotimer" : "whatsapp",
-        providerMessageId: sent?.messages?.[0]?.id || null,
+  let outbound = null;
+  if (sendReply) await prisma.$transaction(async tx => {
+    outbound = await tx.message.create({
+      data: {
+        conversationId: conversation.id,
+        supportCaseId: supportCase?.id || null,
+        competitionId: competitionId || null,
+        direction: "OUTBOUND",
+        phone: conversation.phone,
+        whatsappUserId: conversation.whatsappUserId || null,
+        content: reply,
+        ...(isWhatsapp ? { deliveryStatus: "QUEUED", nextSendAt: new Date() } : {}),
+        aiMetadata: {
+          classification,
+          actionResult,
+          actionError,
+          actionPending,
+          contextActionResult,
+          contextActionError,
+          source: isExotimer ? "exotimer" : "whatsapp",
+        },
+        timestamp: new Date(),
       },
-      timestamp: new Date(),
-    },
+    });
+    if (!replay) for (const message of pendingInboundMessages) await tx.message.update({
+      where: { id: message.id }, data: { aiMetadata: { ...(message.aiMetadata || {}),
+        debounceProcessedAt: new Date().toISOString(), debounceBatchLastMessageId: triggerMessage.id } },
+    });
   });
-  if (!replay && sendReply) await Promise.all(pendingInboundMessages.map(message => prisma.message.update({
-    where: { id: message.id }, data: { aiMetadata: { ...(message.aiMetadata || {}),
-      debounceProcessedAt: new Date().toISOString(), debounceBatchLastMessageId: triggerMessage.id } },
-  })));
+  if (isWhatsapp && outbound) {
+    // Transport retries use this saved response, never repeat the ExoTimer action.
+    await outbox.deliver(outbound.id).catch(() => console.error("Respuesta guardada pendiente de entrega.", { messageId: outbound.id }));
+  }
 
   const verifiedMutation = !actionError && !actionPending && actionResult?.verification &&
     (classification.action === "EXOTIMER_APPLY_RESULT_TIME_EVIDENCE_CORRECTION"
@@ -1895,7 +1874,12 @@ async function processInboundMessage({
 
   if (waId) {
     const duplicate = await prisma.message.findUnique({ where: { waId } });
-    if (duplicate) return { duplicated: true };
+    if (duplicate) {
+      if (!duplicate.aiMetadata?.debounceProcessedAt && !startListAccess.isStartListMessage(duplicate)) {
+        await scheduleConversationProcessing(duplicate.conversationId);
+      }
+      return { duplicated: true };
+    }
   }
 
   const conversation = await findOrCreateConversation({
@@ -2007,7 +1991,7 @@ async function processInboundMessage({
     console.warn("No se pudo enviar notificacion push:", error.message);
   });
 
-  scheduleConversationProcessing(conversation.id);
+  await scheduleConversationProcessing(conversation.id);
 
   return {
     duplicated: false,
@@ -2085,7 +2069,7 @@ async function processInboundExotimerMessage({
     data: { lastMessageAt: inbound.timestamp },
   });
 
-  scheduleConversationProcessing(conversation.id);
+  await scheduleConversationProcessing(conversation.id);
 
   return {
     duplicated: false,

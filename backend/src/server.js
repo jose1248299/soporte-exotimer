@@ -59,4 +59,5 @@ app.use((err, _req, res, _next) => {
 
 app.listen(config.port, () => {
   console.log(`Soporte Exotimer escuchando en puerto ${config.port}`);
+  if (process.env.DATABASE_URL?.trim()) require("./services/replyJobs").startReplyWorker();
 });

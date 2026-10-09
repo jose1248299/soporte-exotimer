@@ -1,7 +1,8 @@
 const express = require("express");
 const prisma = require("../lib/prisma");
-const { sendTextMessage } = require("../services/waba");
-const { whatsappConversationRecipient } = require("../utils/whatsapp");
+const { Prisma } = require("@prisma/client");
+const outbox = require("../services/whatsappOutbox");
+const { enrichMessages } = require("../services/whatsappDelivery");
 
 const router = express.Router();
 
@@ -24,6 +25,9 @@ const messageSelect = {
   aiMetadata: true,
   timestamp: true,
   createdAt: true,
+  providerMessageId: true,
+  deliveryStatus: true,
+  deliveryError: true,
 };
 
 router.get("/", async (req, res) => {
@@ -41,7 +45,9 @@ router.get("/", async (req, res) => {
     },
   });
 
-  res.json(conversations);
+  const messages = await enrichMessages(conversations.flatMap(c => c.messages));
+  const byId = new Map(messages.map(m => [m.id, m]));
+  res.json(conversations.map(c => ({ ...c, messages: c.messages.map(m => byId.get(m.id)) })));
 });
 
 router.get("/:id", async (req, res) => {
@@ -57,6 +63,7 @@ router.get("/:id", async (req, res) => {
   });
 
   if (!conversation) return res.status(404).json({ error: "Conversacion no encontrada" });
+  conversation.messages = await enrichMessages(conversation.messages);
   res.json(conversation);
 });
 
@@ -93,16 +100,7 @@ router.post("/:id/messages", async (req, res) => {
   const conversation = await prisma.conversation.findUnique({ where: { id } });
   if (!conversation) return res.status(404).json({ error: "Conversacion no encontrada" });
 
-  let sent = null;
-  try {
-    sent = await sendTextMessage(
-      whatsappConversationRecipient(conversation),
-      content
-    );
-  } catch (error) {
-    console.error("No se pudo enviar mensaje WhatsApp:", error.response?.data || error.message);
-    return res.status(502).json({ error: "No se pudo enviar por WhatsApp" });
-  }
+  if (conversation.channel !== "WHATSAPP") return res.status(400).json({ error: "Esta conversacion no es de WhatsApp" });
 
   const message = await prisma.message.create({
     data: {
@@ -111,9 +109,10 @@ router.post("/:id/messages", async (req, res) => {
       phone: conversation.phone,
       whatsappUserId: conversation.whatsappUserId || null,
       content,
+      deliveryStatus: "QUEUED",
+      nextSendAt: new Date(),
       aiMetadata: {
         manual: true,
-        providerMessageId: sent?.messages?.[0]?.id || null,
       },
       timestamp: new Date(),
     },
@@ -124,7 +123,25 @@ router.post("/:id/messages", async (req, res) => {
     data: { lastMessageAt: message.timestamp },
   });
 
-  res.status(201).json({ sent, message });
+  const delivered = await outbox.deliver(message.id).catch(() => null);
+  res.status(201).json({ message: delivered || message });
+});
+
+router.post("/:id/messages/:messageId/retry", async (req, res) => {
+  const id = Number(req.params.id);
+  const messageId = Number(req.params.messageId);
+  if (!Number.isInteger(id) || !Number.isInteger(messageId)) return res.status(400).json({ error: "ID invalido" });
+  const message = await prisma.message.findUnique({ where: { id: messageId }, include: { conversation: true } });
+  if (!message || message.conversationId !== id) return res.status(404).json({ error: "Mensaje no encontrado" });
+  if (message.conversation.channel !== "WHATSAPP" || message.direction !== "OUTBOUND" || message.contentType !== "TEXT"
+    || !["FAILED", "EXPIRED"].includes(message.deliveryStatus) || message.aiMetadata?.source === "start_list_whatsapp") {
+    return res.status(409).json({ error: "No se puede reintentar este mensaje sin riesgo de duplicarlo" });
+  }
+  const claimed = await prisma.message.updateMany({ where: { id: messageId, deliveryStatus: message.deliveryStatus },
+    data: { deliveryStatus: "QUEUED", nextSendAt: new Date(), sendAttempts: 0, deliveryError: Prisma.DbNull } });
+  if (!claimed.count) return res.status(409).json({ error: "El mensaje ya esta siendo procesado" });
+  const result = await outbox.deliver(messageId).catch(() => null);
+  res.json({ message: result || await prisma.message.findUnique({ where: { id: messageId } }) });
 });
 
 module.exports = router;

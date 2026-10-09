@@ -2,6 +2,10 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { createRoot } from "react-dom/client";
 import {
   ArrowLeft,
+  AlertCircle,
+  Check,
+  CheckCheck,
+  Clock,
   Bot,
   Camera,
   ClipboardCheck,
@@ -14,6 +18,7 @@ import {
   MessageCircle,
   Pencil,
   Plus,
+  RotateCw,
   Search,
   Send,
   Settings,
@@ -329,6 +334,26 @@ function summarizeAction(action) {
   if (action.output?.type) return action.output.type;
   if (action.input?.requestedValue) return `Valor solicitado: ${action.input.requestedValue}`;
   return "Accion registrada por la IA.";
+}
+
+function MessageDelivery({ message, onRetry }) {
+  const states = {
+    QUEUED: [Clock, "Pendiente"], SENDING: [Clock, "Enviando"],
+    ACCEPTED: [Clock, "Aceptado por Meta"], SENT: [Check, "Enviado"],
+    DELIVERED: [CheckCheck, "Entregado"], READ: [CheckCheck, "Leido"],
+    FAILED: [AlertCircle, "No enviado"], UNKNOWN: [AlertCircle, "Entrega incierta"],
+    EXPIRED: [AlertCircle, "Ventana cerrada"],
+  };
+  const status = message.deliveryStatus || (message.aiMetadata?.providerMessageId ? "ACCEPTED" : "");
+  const entry = states[status];
+  if (!entry) return null;
+  const [Icon, label] = entry;
+  const detail = Array.isArray(message.deliveryError) ? message.deliveryError.map(e => e.message || e.title).join("; ") : "";
+  return <span className={`message-delivery delivery-${status.toLowerCase()}`} title={detail ? `${label}: ${detail}` : label}>
+    <Icon size={13} aria-hidden="true" /><span>{label}</span>
+    {["FAILED", "EXPIRED"].includes(status) && onRetry && message.aiMetadata?.source !== "start_list_whatsapp" &&
+      <button type="button" className="delivery-retry" title="Reintentar envio" aria-label="Reintentar envio" onClick={() => onRetry(message)}><RotateCw size={14} /></button>}
+  </span>;
 }
 
 function MessageMedia({ message, onPreview }) {
@@ -1305,6 +1330,7 @@ function SupportApp({ onOpenMessages, onOpenDirectory, onOpenConfig, onSignOut }
     const optimistic = {
       id: `local-${Date.now()}`,
       direction: "OUTBOUND",
+      deliveryStatus: "SENDING",
       content,
       timestamp: new Date().toISOString(),
     };
@@ -1321,6 +1347,8 @@ function SupportApp({ onOpenMessages, onOpenDirectory, onOpenConfig, onSignOut }
         body: JSON.stringify({ content }),
       });
       if (!res.ok) throw new Error("No se pudo enviar");
+      const result = await res.json();
+      if (result.message) setMessages(prev => prev.map(item => item.id === optimistic.id ? result.message : item));
     } catch {
       setMessages((prev) =>
         prev.map((item) =>
@@ -1330,6 +1358,15 @@ function SupportApp({ onOpenMessages, onOpenDirectory, onOpenConfig, onSignOut }
     } finally {
       setSending(false);
     }
+  }
+
+  async function retryMessage(message) {
+    try {
+      const res = await apiFetch(`/api/conversations/${message.conversationId}/messages/${message.id}/retry`, { method: "POST" });
+      const result = await res.json();
+      if (!res.ok) throw new Error(result.error || "No se pudo reintentar");
+      if (result.message) setMessages(prev => prev.map(item => item.id === message.id ? result.message : item));
+    } catch (error) { alert(error.message); }
   }
 
   async function handleActionDecision(actionId, decision) {
@@ -1528,6 +1565,7 @@ function SupportApp({ onOpenMessages, onOpenDirectory, onOpenConfig, onSignOut }
                         <time>
                           {humanTime(message.timestamp)}
                           {message.failed ? " · no enviado" : ""}
+                          {message.direction === "OUTBOUND" && !message.failed && <MessageDelivery message={message} onRetry={retryMessage} />}
                         </time>
                       </article>
                     )
