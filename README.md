@@ -86,6 +86,9 @@ Las acciones con riesgo quedan como `PROPOSED` y se ejecutan desde el panel de c
 
 ## Variables de entorno
 
+Preparación opcional de avisos de corrección a Slack, desactivada por defecto:
+[configuración, datos compartidos y límites](docs/SLACK_CORRECTIONS.md).
+
 - `DATABASE_URL`: PostgreSQL.
 - `META_ACCESS_TOKEN`: token permanente o de sistema de Meta.
 - `META_WABA_ID`: id del WhatsApp Business Account.

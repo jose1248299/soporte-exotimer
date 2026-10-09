@@ -8,6 +8,11 @@ const {
 
 const router = express.Router();
 
+// Mounted behind requireFirebaseAuth; no webhook URL or saved message content is exposed.
+router.get("/slack", async (_req, res) => {
+  res.json(await require("../services/slackCorrections").getSlackCorrectionStatus());
+});
+
 router.get("/public-key", (_req, res) => {
   res.json({
     configured: isPushConfigured(),

@@ -31,6 +31,12 @@ const config = {
   support: {
     replyDebounceMs: Number(process.env.SUPPORT_REPLY_DEBOUNCE_MS || 8000),
   },
+  slack: {
+    enabled: process.env.SLACK_CORRECTIONS_ENABLED === "true",
+    webhookUrl: process.env.SLACK_CORRECTIONS_WEBHOOK_URL || "",
+    caseBaseUrl: process.env.SLACK_CASE_BASE_URL || "",
+    includeReply: process.env.SLACK_INCLUDE_AUTO_REPLY === "true",
+  },
   finisherData: {
     publicUrl: (process.env.FINISHER_DATA_PUBLIC_URL || "https://finisherdata.com").replace(/\/+$/, ""),
   },

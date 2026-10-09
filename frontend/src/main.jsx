@@ -36,6 +36,7 @@ import {
   signOut,
 } from "./firebase.js";
 import { apiBlobUrl, apiFetch, setAuthTokenProvider } from "./utils/api.js";
+import { parseCaseLink, filterLinkedCase } from "./utils/caseLink.js";
 import "./styles.css";
 
 const USER_LABELS = {
@@ -1104,6 +1105,8 @@ function SupportApp({ onOpenMessages, onOpenDirectory, onOpenConfig, onSignOut }
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [previewImage, setPreviewImage] = useState(null);
   const listLoaded = useRef(false);
+  const linkedCaseRef = useRef(parseCaseLink(window.location.search));
+  const caseLinkAppliedRef = useRef(false);
   const chatRef = useRef(null);
   const scrollModeRef = useRef("bottom");
   const lastConversationIdRef = useRef(null);
@@ -1129,11 +1132,23 @@ function SupportApp({ onOpenMessages, onOpenDirectory, onOpenConfig, onSignOut }
         return res.json();
       })
       .then((data) => {
-        const normalized = Array.isArray(data) ? groupInboxConversations(data.map(normalizeConversation)) : [];
+        const sourceConversations = Array.isArray(data) ? data : [];
+        const normalized = groupInboxConversations(sourceConversations.map(normalizeConversation));
         setConversations(normalized);
         setUsingDemo(false);
         if (!normalized.length) setMessages([]);
         setSelected((current) => {
+          if (!caseLinkAppliedRef.current && linkedCaseRef.current) {
+            caseLinkAppliedRef.current = true;
+            const linked = sourceConversations.find(item => item.id === linkedCaseRef.current.conversationId);
+            if (linked) return { ...normalizeConversation(linked), isLinkedCase: true, linkedCaseId: linkedCaseRef.current.caseId };
+            setListError("La conversación enlazada no está disponible.");
+            return null;
+          }
+          if (current?.isLinkedCase) {
+            const linked = sourceConversations.find(item => item.id === current.id);
+            if (linked) return { ...normalizeConversation(linked), isLinkedCase: true, linkedCaseId: current.linkedCaseId };
+          }
           if (!normalized.length) return null;
           if (!current) return isMobileLayout() || listLoaded.current ? null : normalized[0];
           if (String(current.id).startsWith("demo-")) return normalized[0];
@@ -1237,8 +1252,8 @@ function SupportApp({ onOpenMessages, onOpenDirectory, onOpenConfig, onSignOut }
         return res.json();
       })
       .then((data) => {
-        setMessages(Array.isArray(data.messages) ? data.messages : []);
-        setConversationActions(Array.isArray(data.actions) ? data.actions : []);
+        setMessages(filterLinkedCase(data.messages, conversation.linkedCaseId));
+        setConversationActions(filterLinkedCase(data.actions, conversation.linkedCaseId));
       })
       .catch(() => {
         if (!silent) {
@@ -1260,7 +1275,7 @@ function SupportApp({ onOpenMessages, onOpenDirectory, onOpenConfig, onSignOut }
     return () => {
       window.clearInterval(interval);
     };
-  }, [loadMessages, selected?.id, selected?.conversationIds?.join(",")]);
+  }, [loadMessages, selected?.id, selected?.linkedCaseId, selected?.conversationIds?.join(",")]);
 
   useEffect(() => {
     const node = chatRef.current;
@@ -1422,6 +1437,7 @@ function SupportApp({ onOpenMessages, onOpenDirectory, onOpenConfig, onSignOut }
         </section>
       )}
 
+      {selected?.linkedCaseId && <div className="inline-alert">Caso #{selected.linkedCaseId}: respuesta y acciones guardadas.</div>}
       <section className="inbox">
         <aside className={`conversation-pane ${selected ? "hide-mobile" : ""}`}>
           <div className="pane-header">

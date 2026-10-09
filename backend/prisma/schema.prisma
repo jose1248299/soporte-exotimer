@@ -173,6 +173,7 @@ model Message {
 
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   supportCase  SupportCase? @relation(fields: [supportCaseId], references: [id], onDelete: SetNull)
+  slackObservation SlackCorrectionObservedReply?
 
   @@index([conversationId, timestamp])
   @@index([supportCaseId, timestamp])
@@ -271,4 +272,49 @@ model StartListWhatsappSession {
   processingUntil     DateTime?
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
+}
+
+// Slack observes saved replies/actions; it never owns support decisions or mutations.
+model SlackCorrectionCursor {
+  id            String   @id
+  startedAt     DateTime @default(now())
+  lastWatchId   Int      @default(0)
+  nextSendAt    DateTime @default(now())
+}
+
+model SlackCorrectionObservedReply {
+  messageId Int @id
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+}
+
+model SlackCorrectionWatch {
+  id            Int      @id @default(autoincrement())
+  key           String   @unique
+  conversationId Int
+  supportCaseId Int?     @unique
+  lastReplyId   Int
+  lastReplyHash String
+  createdAt     DateTime @default(now())
+  notifications SlackCorrectionNotification[]
+
+  @@index([conversationId])
+}
+
+model SlackCorrectionNotification {
+  id          Int      @id @default(autoincrement())
+  eventKey    String   @unique
+  watchId     Int
+  kind        String
+  payload     Json
+  state       String   @default("PENDING")
+  attempts    Int      @default(0)
+  nextSendAt  DateTime @default(now())
+  attemptedAt DateTime?
+  sentAt      DateTime?
+  lastError   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  watch SlackCorrectionWatch @relation(fields: [watchId], references: [id], onDelete: Cascade)
+
+  @@index([state, nextSendAt])
 }
