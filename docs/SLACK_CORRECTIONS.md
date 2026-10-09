@@ -16,24 +16,27 @@ La detección depende de la clasificación existente; debe validarse con casos r
 autorizados antes de activar el emisor.
 
 Consulta las acciones de corrección guardadas, incluidas ejecuciones humanas del panel.
-La etiqueta **verificada** exige `EXOTIMER_APPLY_RESULT_TIME_EVIDENCE_CORRECTION`
+El estado interno **VERIFIED** exige `EXOTIMER_APPLY_RESULT_TIME_EVIDENCE_CORRECTION`
 con `verification.verified === true`. Una solicitud registrada, un `EXECUTED`, un
 caso `RESOLVED` o una respuesta de IA que diga «corregido» no bastan. Una escritura
-sin lectura concluyente y una lectura discrepante se presentan como pendientes de revisión.
+sin lectura concluyente y una lectura discrepante conservan su seguimiento interno sin
+publicar ese estado en Slack.
 No vuelve a llamar a Exotimer, no altera políticas, respuestas, estados de casos ni acciones.
 Si alguien cambia tiempos fuera de este proyecto, no hay supervisión automática de ese
 cambio salvo que el flujo existente guarde una nueva acción con evidencia.
 
-El aviso comparte identificador, enlace y estado operativo genérico. Los nombres,
-dorsales, documentos, teléfonos, evidencias, entradas/salidas Exotimer y texto de IA no
-se comparten por defecto. El enlace abre el panel autenticado y filtra el caso indicado;
+El aviso comparte exclusivamente identificador y enlace autenticado. Los nombres,
+dorsales, documentos, teléfonos, evidencias, entradas/salidas Exotimer y texto de IA
+no se comparten, ni tampoco el estado operativo. El enlace abre el panel autenticado
+y filtra el caso indicado;
 si todavía no hay caso abre la conversación. La respuesta automática se consulta allí.
 Los despliegues de frontend y backend deben incluir esta versión para abrir esos enlaces.
 
-`SLACK_INCLUDE_AUTO_REPLY=true` añade hasta 2500 caracteres de la respuesta guardada
-en texto plano. Puede contener datos personales: **no está autorizado en el alcance
-actual**. Requiere una decisión adicional antes de usarlo. Guardada no significa entregada
-por WhatsApp. Con `false` también se omite el texto de avisos pendientes previamente creados.
+`SLACK_INCLUDE_AUTO_REPLY` debe mantenerse en `false`. Aunque se configure accidentalmente
+en `true`, no habilita la publicación de respuestas ni de estados: el renderizador solo
+admite identificador y enlace. Los avisos nuevos guardan únicamente estos dos campos;
+los avisos históricos conservan sus datos de auditoría, pero el envío de cualquier aviso
+pendiente filtra los campos antiguos. No se editan ni borran los mensajes ya publicados.
 
 ## Configuración pendiente de aprobación final
 

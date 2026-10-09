@@ -130,6 +130,17 @@ test("ID and authenticated case link are the only case data shared by default", 
   for (const personal of ["Ana", "12345678", "+51912345678", "Se corrigió"]) assert.ok(!serialized.includes(personal));
   assert.equal(f.sends[0].payload.blocks[1].elements[0].url, "https://support.example.test/?conversation=8&case=21");
   assert.equal(f.sends[0].payload.unfurl_links, false);
+  assert.deepEqual(Object.keys(f.rows.notifications[0].payload).sort(), ["identifier", "url"]);
+  assert.deepEqual(f.sends[0].payload, {
+    text: "Caso #21",
+    blocks: [
+      { type: "section", text: { type: "plain_text", text: "Caso #21", emoji: false } },
+      { type: "actions", elements: [{ type: "button", text: { type: "plain_text", text: "Abrir caso en soporte" },
+        url: "https://support.example.test/?conversation=8&case=21" }] },
+    ],
+    unfurl_links: false,
+    unfurl_media: false,
+  });
   assert.deepEqual(f.rows.messages[0].aiMetadata.classification, classification);
   assert.equal(f.rows.actions.length, 0);
 });
@@ -166,7 +177,7 @@ test("provisional conversation promotes to a case and repeated triage produces o
   assert.equal(f.sends.length, 1);
 });
 
-test("confirmed response opt-in uses plain text and deduplicates repeated saved responses", async () => {
+test("legacy reply flag cannot expand shared data; repeated saved responses remain deduplicated", async () => {
   const f = fixture({ options: { includeReply: true } });
   await f.worker.tick();
   f.reply(1, { content: "<@here> A" });
@@ -178,9 +189,49 @@ test("confirmed response opt-in uses plain text and deduplicates repeated saved 
   f.advance(1000);
   await f.worker.tick();
   assert.equal(f.sends.length, 2);
-  assert.equal(f.sends[0].payload.blocks[2].text.type, "plain_text");
-  assert.match(f.sends[0].payload.blocks[2].text.text, /<@here>/);
-  assert.equal(renderPayload({ identifier: "ID", status: "Saved", url: "https://support.example.test", reply: "private" }, false).blocks.length, 2);
+  for (const send of f.sends) {
+    assert.equal(send.payload.blocks.length, 2);
+    assert.equal(send.payload.text, "Caso #21");
+    assert.ok(!JSON.stringify(send.payload).includes("<@here>"));
+  }
+  for (const row of f.rows.notifications) {
+    assert.deepEqual(Object.keys(row.payload).sort(), ["identifier", "url"]);
+  }
+});
+
+test("legacy queued payloads are filtered at delivery without rewriting their audit history", async () => {
+  const f = fixture({ options: { includeReply: true } });
+  await f.worker.tick();
+  f.reply(1);
+  await f.worker.observeReply(f.rows.messages[0]);
+  const event = f.rows.notifications[0];
+  Object.assign(event.payload, { status: "PRIVATE_STATUS", reply: "PRIVATE_REPLY", athleteName: "PRIVATE_NAME" });
+  await f.worker.deliver(structuredClone(event));
+  const rendered = JSON.stringify(f.sends[0].payload);
+  for (const value of ["PRIVATE_STATUS", "PRIVATE_REPLY", "PRIVATE_NAME"]) assert.ok(!rendered.includes(value));
+  assert.equal(event.payload.status, "PRIVATE_STATUS");
+  assert.equal(event.payload.reply, "PRIVATE_REPLY");
+  assert.equal(event.state, "SENT");
+  assert.equal(renderPayload(event.payload, true).blocks.length, 2);
+});
+
+test("replaying the same saved message and SENT event through fresh workers does not send again", async () => {
+  const f = fixture();
+  await f.worker.tick();
+  f.reply(1);
+  await f.worker.tick();
+  const event = structuredClone(f.rows.notifications[0]);
+  for (let i = 0; i < 2; i++) {
+    const worker = f.createWorker();
+    await worker.observeReply(structuredClone(f.rows.messages[0]));
+    await worker.deliver(event);
+  }
+  assert.equal(f.sends.length, 1);
+  assert.equal(f.rows.observed.length, 1);
+  assert.equal(f.rows.notifications.length, 1);
+  assert.equal(f.rows.notifications[0].eventKey, event.eventKey);
+  assert.equal(f.rows.notifications[0].attempts, 1);
+  assert.equal(f.rows.notifications[0].state, "SENT");
 });
 
 test("observes human action transitions without invoking corrections; reused action is deduplicated", async () => {

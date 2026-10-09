@@ -61,24 +61,20 @@ function caseUrl(settings, watch) {
   return url.toString();
 }
 
-function notificationPayload(settings, watch, status, reply) {
+function notificationPayload(settings, watch) {
   return {
     identifier: watch.supportCaseId ? `Caso #${watch.supportCaseId}` : `Solicitud de conversación #${watch.conversationId}`,
     url: caseUrl(settings, watch),
-    status,
-    ...(settings.includeReply && reply ? { reply: String(reply).slice(0, 2500) } : {}),
   };
 }
 
-function renderPayload(payload, includeReply = false) {
+function renderPayload(payload) {
+  // Apply the same field whitelist to new and legacy queued notifications.
   const blocks = [
-    { type: "section", text: { type: "plain_text", text: `${payload.identifier}\n${payload.status}`, emoji: false } },
+    { type: "section", text: { type: "plain_text", text: payload.identifier, emoji: false } },
     { type: "actions", elements: [{ type: "button", text: { type: "plain_text", text: "Abrir caso en soporte" }, url: payload.url }] },
   ];
-  if (includeReply && payload.reply) blocks.push({ type: "section", text: {
-    type: "plain_text", text: `Respuesta automática guardada (no implica entrega):\n${payload.reply}`, emoji: false,
-  } });
-  return { text: `${payload.identifier}: ${payload.status}`, blocks, unfurl_links: false, unfurl_media: false };
+  return { text: payload.identifier, blocks, unfurl_links: false, unfurl_media: false };
 }
 
 // The transport has no access to Exotimer, OpenAI or WhatsApp and never follows redirects.
@@ -99,9 +95,9 @@ function createSlackCorrections({ db, settings, send = postWebhook, now = () => 
     } });
   }
 
-  async function queue(tx, watch, key, kind, status, reply) {
+  async function queue(tx, watch, key, kind) {
     await tx.slackCorrectionNotification.upsert({ where: { eventKey: key }, update: {}, create: {
-      eventKey: key, watchId: watch.id, kind, payload: notificationPayload(settings, watch, status, reply), nextSendAt: now(),
+      eventKey: key, watchId: watch.id, kind, payload: notificationPayload(settings, watch), nextSendAt: now(),
     } });
   }
 
@@ -129,12 +125,10 @@ function createSlackCorrections({ db, settings, send = postWebhook, now = () => 
           key, conversationId: message.conversationId, supportCaseId: message.supportCaseId || null,
           lastReplyId: message.id, lastReplyHash: hash,
         } });
-        await queue(tx, watch, `watch:${watch.id}:reply:${hash}`, "REQUEST",
-          "Nueva solicitud de corrección de tiempo. Respuesta automática guardada; resultado pendiente de verificación.", message.content);
+        await queue(tx, watch, `watch:${watch.id}:reply:${hash}`, "REQUEST");
       } else {
         if (settings.includeReply && watch.lastReplyHash !== hash) {
-          await queue(tx, watch, `watch:${watch.id}:reply:${hash}`, "REPLY",
-            "Nueva respuesta automática guardada; consultar la evidencia de la corrección en el panel.", message.content);
+          await queue(tx, watch, `watch:${watch.id}:reply:${hash}`, "REPLY");
         }
         await tx.slackCorrectionWatch.update({ where: { id: watch.id }, data: { lastReplyId: message.id, lastReplyHash: hash } });
       }
@@ -159,7 +153,7 @@ function createSlackCorrections({ db, settings, send = postWebhook, now = () => 
         const observation = actionObservation(action);
         const canonicalId = action.output?.idempotentReplay && action.output?.reusedFromActionId || action.id;
         if (observation) await queue(db, watch, `watch:${watch.id}:action:${canonicalId}:${observation.code}`,
-          "ACTION", observation.label);
+          "ACTION");
       }
     }
     await db.slackCorrectionCursor.updateMany({ where: { id: CURSOR_ID, lastWatchId: cursor.lastWatchId },
@@ -173,7 +167,7 @@ function createSlackCorrections({ db, settings, send = postWebhook, now = () => 
     }, data: { state: "SENDING", attempts: { increment: 1 }, attemptedAt: now(), lastError: null } });
     if (!claimed.count) return;
     let response;
-    try { response = await send(settings.webhookUrl, renderPayload(event.payload, settings.includeReply)); }
+    try { response = await send(settings.webhookUrl, renderPayload(event.payload)); }
     catch {
       // Timeout/network errors can happen after Slack accepted the message: never resend blindly.
       await db.slackCorrectionNotification.update({ where: { id: event.id }, data: {
