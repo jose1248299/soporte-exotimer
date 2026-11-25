@@ -1,5 +1,6 @@
 const axios = require("axios");
 const config = require("../config");
+const { currentOperator } = require('./timingOperatorContext');
 
 let cachedAccessToken = config.raceline.token || null;
 
@@ -52,7 +53,15 @@ function requestHeaders(token, headers, data) {
 
 async function apiRequest({ method = "GET", path, data, params, headers, responseType, retryOnAuth = true }) {
   assertClientConfig();
-  const token = await getAccessToken();
+  const operator = currentOperator();
+  if (operator && operator.expiresAt <= Date.now()) throw new Error('La autorización del operador venció; vuelve a enviar la solicitud.');
+  const token = operator ? operator.authorization.slice(7) : await getAccessToken();
+  if (operator) {
+    headers = { ...Object.fromEntries(Object.entries(headers || {}).filter(([key]) => !['authorization', 'x-timing-organization-id'].includes(key.toLowerCase()))), Authorization: operator.authorization,
+      ...(operator.organizationId ? { 'X-Timing-Organization-Id': String(operator.organizationId) } : {}) };
+    // Never fall back to the service account when the real operator is denied.
+    retryOnAuth = false;
+  }
 
   try {
     const response = await axios.request({
@@ -68,7 +77,7 @@ async function apiRequest({ method = "GET", path, data, params, headers, respons
 
     return response.data;
   } catch (error) {
-    if (retryOnAuth && error.response?.status === 401) {
+    if (retryOnAuth && !currentOperator() && error.response?.status === 401) {
       cachedAccessToken = null;
       await loginRaceline();
       return apiRequest({ method, path, data, params, headers, responseType, retryOnAuth: false });
@@ -95,7 +104,7 @@ async function apiMultipartRequest({ method = "POST", path, fields = {}, files =
   try {
     return await apiRequest({ method, path, data: formData, retryOnAuth });
   } catch (error) {
-    if (retryOnAuth && error.response?.status === 401) {
+    if (retryOnAuth && !currentOperator() && error.response?.status === 401) {
       cachedAccessToken = null;
       await loginRaceline();
       return apiMultipartRequest({ method, path, fields, files, retryOnAuth: false });

@@ -90,6 +90,7 @@ router.post("/competitions/:competitionId/assistant/messages", async (req, res) 
       userRole,
       text: content,
       context: req.body?.context || null,
+      operatorAuthorization: req.body?.operatorAuthorization,
     });
 
     res.status(201).json(result);

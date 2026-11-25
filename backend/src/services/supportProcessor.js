@@ -1341,7 +1341,21 @@ async function processConversationReply(conversationId, { replay = false, previe
   return job;
 }
 
-async function runConversationReply(conversationId, { replay, preview, sendReply }) {
+async function runConversationReply(conversationId, options) {
+  const { enabled, openAuthorization, withOperatorAuthorization } = require('./timingOperatorContext');
+  const conversation = await prisma.conversation.findUnique({ where: { id: conversationId } });
+  if (conversation?.channel !== 'EXOTIMER') return runConversationReplyWithContext(conversationId, options);
+  const message = await prisma.message.findFirst({ where: { conversationId, direction: 'INBOUND' }, orderBy: { id: 'desc' } });
+  const payload = message?.rawPayload || {};
+  if (!enabled() && !payload.operatorAuthorization) return runConversationReplyWithContext(conversationId, options);
+  let actor;
+  try { actor = openAuthorization(payload.operatorAuthorization, { competitionId: message?.competitionId,
+    userId: payload.userId, secret: config.security.exotimerApiKey }); }
+  catch { actor = { expiresAt: 0 }; } // Fail in the operator reply, never fall back to the service account or endlessly retry the queue.
+  return withOperatorAuthorization(actor, () => runConversationReplyWithContext(conversationId, options));
+}
+
+async function runConversationReplyWithContext(conversationId, { replay, preview, sendReply }) {
   const conversation = await prisma.conversation.findUnique({
     where: { id: conversationId },
   });
@@ -1374,6 +1388,11 @@ async function runConversationReply(conversationId, { replay, preview, sendReply
   const triggerMessage = pendingInboundMessages[pendingInboundMessages.length - 1];
   const contextText = buildExotimerContextText(triggerMessage, conversation);
   const processableText = [contextText, buildCombinedProcessableText(pendingInboundMessages)].filter(Boolean).join("\n\n");
+  if (require('./timingOperatorContext').currentOperator()) {
+    if (preview) return { conversationId, preview: true, operator: true };
+    return require('./timingOperator').runOperatorReply({ conversation, triggerMessage,
+      pendingInboundMessages, history, text: buildCombinedProcessableText(pendingInboundMessages), sendReply, replay });
+  }
   let resultContext = null;
   const previousInput = canonicalizeResultInput(conversation.classification?.actionInput || {}, actionHistory);
   if (conversation.userType === "ATHLETE" && pickCompetitionId(previousInput) &&
@@ -2024,13 +2043,23 @@ async function processInboundExotimerMessage({
   userRole,
   text = "",
   context,
+  operatorAuthorization,
   timestamp = new Date(),
 }) {
   const content = String(text || "").trim();
   if (!content) throw new Error("Mensaje requerido");
 
+  if (operatorAuthorization && !require('./timingOperatorContext').enabled()) {
+    throw new Error('La operación asistida aún no está habilitada en el servidor. No se ejecutó ninguna acción.');
+  }
+
   const normalizedCompetitionId = Number(competitionId);
   if (!Number.isInteger(normalizedCompetitionId)) throw new Error("competitionId invalido");
+  if (require('./timingOperatorContext').enabled()) {
+    require('./timingOperatorContext').openAuthorization(operatorAuthorization, {
+      competitionId: normalizedCompetitionId, userId: String(userId), secret: config.security.exotimerApiKey,
+    });
+  }
 
   const conversation = await findOrCreateExotimerConversation({
     competitionId: normalizedCompetitionId,
@@ -2049,6 +2078,7 @@ async function processInboundExotimerMessage({
       content,
       rawPayload: {
         source: "exotimer",
+        ...(operatorAuthorization ? { operatorAuthorization } : {}),
         competitionId: normalizedCompetitionId,
         userId: String(userId),
         userName: userName || null,
