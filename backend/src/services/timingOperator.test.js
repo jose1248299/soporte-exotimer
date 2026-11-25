@@ -43,6 +43,30 @@ function harness(options={}) {
 }
 const change={kind:'time',result_id:18,changes:{name_column:'loc_Meta',timeDateCurrent:'2026-11-21T09:02:03'},reason:'Hora exacta indicada por operador'};
 
+test('large contexts retain full configuration and page participants without skipping rows',async()=>withOperatorAuthorization(actor(),async()=>{
+  const h=harness(), rows=Array.from({length:100},(_,i)=>({id:i+1,dorsal:i+1,controls:{raw:'x'.repeat(1000)}}));
+  const request=async({params})=>({competition_id:634,configs:[{id:7,event_id:9,reader_bindings:'x'.repeat(120000)}],participants:structuredClone(rows.slice(params.offset)),next_offset:null});
+  const s=createOperatorSession(h.input,{prisma:h.db,request});
+  const first=await s.inspect();
+  assert.ok(JSON.stringify(first).length<=145000);
+  assert.equal(first.configs[0].reader_bindings.length,120000);
+  assert.ok(first.next_offset>0 && first.next_offset<100);
+  const seen=[...first.participants];let cursor=first.next_offset;
+  while(cursor!==null){const page=await s.inspect({offset:cursor});seen.push(...page.participants);cursor=page.next_offset;}
+  assert.deepEqual(seen.map(r=>r.id),rows.map(r=>r.id));
+  const config=await s.inspect({configuration_only:true});
+  assert.equal(config.participants.length,0);assert.equal(config.participants_omitted,true);
+  assert.equal(config.configs[0].reader_bindings.length,120000);
+}));
+
+test('oversized configuration asks for scoped inspection and rejects foreign config ids',async()=>withOperatorAuthorization(actor(),async()=>{
+  const h=harness(),request=async()=>({competition_id:634,configs:[{id:7,event_id:9,data:'x'.repeat(80000)},{id:8,event_id:10,data:'y'.repeat(80000)}],participants:[]});
+  const s=createOperatorSession(h.input,{prisma:h.db,request});
+  assert.equal((await s.inspect()).available_configs.length,2);
+  assert.equal((await s.inspect({configuration_only:true,config_id:7})).configs.length,1);
+  await assert.rejects(s.inspect({config_id:999}),/no pertenece/);
+}));
+
 test('operator envelope binds user and competition, rejects tampering and expiration',()=>{
   const value=actor(), envelope=seal(value), scope={competitionId:634,userId:value.userId,secret:'test-key'};
   assert.deepEqual(openAuthorization(envelope,scope),value);

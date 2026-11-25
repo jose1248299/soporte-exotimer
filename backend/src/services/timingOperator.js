@@ -65,11 +65,34 @@ function createOperatorSession(input, dependencies = {}) {
   const scope = { actorId: actor.accountId, competitionId: actor.competitionId, organizationId: actor.organizationId };
   const scoped = record => record.conversationId === input.conversationId && record.input?.actorId === scope.actorId
     && record.input?.competitionId === scope.competitionId && record.input?.organizationId === scope.organizationId;
-  async function inspect({ dorsal, offset = 0 } = {}) {
+  async function inspect({ dorsal, offset = 0, configuration_only = false, config_id } = {}) {
     if (dorsal != null && (!Number.isSafeInteger(dorsal) || dorsal < 1)) throw new Error('Dorsal inválido.');
     if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('Página inválida.');
+    if (config_id != null && (!Number.isSafeInteger(config_id) || config_id < 1)) throw new Error('Configuración inválida.');
     const data = await request({ path: `${PREFIX}/context`, params: { competition_id: actor.competitionId, dorsal, offset } });
     if (data.competition_id !== actor.competitionId) throw new Error('El contexto no corresponde a esta competición.');
+    if (config_id != null) {
+      data.configs = (data.configs || []).filter(row => row.id === config_id);
+      if (!data.configs.length) throw new Error('La configuración no pertenece a esta competición.');
+    }
+    if (configuration_only === true) {
+      data.participants = [];
+      data.detail = null;
+      data.next_offset = null;
+      data.participants_omitted = true;
+    } else if (dorsal == null) {
+      // Keep every configuration field, but shrink the participant page to fit.
+      // The cursor points at the first omitted row so subsequent reads lose none.
+      while ((data.participants || []).length > 1 && JSON.stringify(data).length > 145000) {
+        data.participants.pop();
+        data.next_offset = offset + data.participants.length;
+      }
+    }
+    if (JSON.stringify(data).length > 145000) return {
+      competition_id: actor.competitionId,
+      error: 'Contexto demasiado extenso. Consulta configuration_only=true para configuración y config_id para una distancia concreta; consulta dorsal para participantes.',
+      available_configs: (data.configs || []).map(row => ({ id: row.id, event_id: row.event_id })),
+    };
     for (const row of data.participants || []) resultIds.add(row.id);
     for (const row of data.configs || []) configIds.add(row.id);
     return data;
@@ -194,7 +217,7 @@ function tool(name, description, properties, required = []) {
 }
 const TOOLS = [
   tool('clarify', 'Solicita exclusivamente el dato que falta para continuar; no afirma que se hayan aplicado cambios.', { question: { type: 'string' } }, ['question']),
-  tool('inspect', 'Lee configuración, categorías y participantes. Usa dorsal para obtener ficha y lecturas; sin dorsal pagina de 100.', { dorsal: { type: 'integer' }, offset: { type: 'integer' } }),
+  tool('inspect', 'Lee configuración, categorías y participantes. Para partidas, distancias, lectores y controles usa configuration_only=true. config_id permite consultar una sola configuración. Usa dorsal para ficha y lecturas. Sin dorsal pagina hasta 100 participantes: continúa con next_offset.', { dorsal: { type: 'integer' }, offset: { type: 'integer' }, configuration_only: { type: 'boolean' }, config_id: { type: 'integer' } }),
   tool('change', 'Previsualiza y aplica cambios claros; retiene riesgos para confirmación humana. participant: first_name,last_name,club,event_id,category_id,gender,dorsal,chip,salida. time: name_column loc_..., select_raw o timeDateCurrent ISO local. state: state. configuration: campos exactos del contexto (salidas,locations,sections,type_salidas,start_waves,checkpoints,structured_sections,reader_bindings).', {
     kind: { type: 'string', enum: ['participant','time','state','configuration'] }, result_id: { type: 'integer' }, config_id: { type: 'integer' },
     changes: { type: 'object', additionalProperties: true }, reason: { type: 'string' }, estimated: { type: 'boolean' },
